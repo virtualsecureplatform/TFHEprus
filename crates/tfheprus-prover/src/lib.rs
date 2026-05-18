@@ -28,6 +28,7 @@ use range_check::{
     proof_range_check_bit_counts, range_check_bit_counts, RangeCheckAirBuilder,
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
+use serde::{Deserialize, Serialize};
 use tfheprus_circuits::{
     build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
     build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
@@ -112,7 +113,7 @@ impl ActualPbsChainChunkStatement {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActualPbsChainSummary {
     pub params: Params,
     pub step_count: usize,
@@ -195,6 +196,7 @@ pub struct AggregatedRecursiveActualPbsChainChunkTreeProof {
     pub chain_summary: ActualPbsChainSummary,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct AggregatedRecursiveActualPbsChainRootProof {
     pub chain_summary: ActualPbsChainSummary,
     pub root: recursive::AggregatedRecursiveBatchProof,
@@ -253,6 +255,7 @@ impl ActualPbsChainChunkProof {
 pub enum ProofError {
     StatementMismatch,
     Plonky3(String),
+    Serialization(String),
 }
 
 impl fmt::Display for ProofError {
@@ -260,6 +263,7 @@ impl fmt::Display for ProofError {
         match self {
             Self::StatementMismatch => write!(f, "proof does not match the requested statement"),
             Self::Plonky3(message) => write!(f, "plonky3 error: {message}"),
+            Self::Serialization(message) => write!(f, "serialization error: {message}"),
         }
     }
 }
@@ -867,6 +871,18 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
         &proof.root,
         &summary.field_values(),
     )
+}
+
+pub fn serialize_aggregated_recursive_actual_pbs_chain_root_proof(
+    proof: &AggregatedRecursiveActualPbsChainRootProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_aggregated_recursive_actual_pbs_chain_root_proof(
+    bytes: &[u8],
+) -> Result<AggregatedRecursiveActualPbsChainRootProof, ProofError> {
+    postcard::from_bytes(bytes).map_err(|error| ProofError::Serialization(format!("{error:?}")))
 }
 
 fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> {
@@ -1569,6 +1585,15 @@ mod tests {
             verify_actual_pbs_chain_chunk_statement_proof(&statement, &proof),
             Err(ProofError::StatementMismatch)
         );
+    }
+
+    #[test]
+    fn rejects_malformed_root_proof_artifact() {
+        match deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&[0xff]) {
+            Err(ProofError::Serialization(_)) => {}
+            Err(error) => panic!("unexpected error: {error:?}"),
+            Ok(_) => panic!("malformed root proof bytes must fail to deserialize"),
+        }
     }
 
     fn proves_and_verifies_actual_pbs_with_params(params: Params) {

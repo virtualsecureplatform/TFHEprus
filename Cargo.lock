@@ -964,6 +964,7 @@ version = "0.1.0"
 dependencies = [
  "rand 0.8.6",
  "rand_chacha",
+ "serde",
  "thiserror 1.0.69",
 ]
 
@@ -987,9 +988,11 @@ dependencies = [
  "p3-recursion",
  "p3-symmetric",
  "p3-uni-stark",
+ "postcard",
  "rand 0.10.1",
  "rand 0.8.6",
  "rand_chacha",
+ "serde",
  "tfheprus-circuits",
  "tfheprus-core",
 ]

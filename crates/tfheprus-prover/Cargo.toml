@@ -24,8 +24,10 @@ p3-merkle-tree.workspace = true
 p3-recursion.workspace = true
 p3-symmetric.workspace = true
 p3-uni-stark.workspace = true
+postcard.workspace = true
 rand.workspace = true
 rand_p3 = { package = "rand", version = "0.10.0", default-features = false }
+serde.workspace = true
 
 [dev-dependencies]
 rand_chacha.workspace = true

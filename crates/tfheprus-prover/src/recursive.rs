@@ -65,6 +65,7 @@ pub struct RecursiveBatchProof {
     proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct AggregatedRecursiveBatchProof {
     public_inputs: Vec<Challenge>,
     proof: BatchStarkProof<GoldilocksConfig>,

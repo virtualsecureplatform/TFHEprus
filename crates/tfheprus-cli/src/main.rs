@@ -16,11 +16,12 @@ use tfheprus_core::{
     TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
-    prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
-    prove_actual_pbs_step_chain, prove_actual_pbs_step_private,
-    prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
+    deserialize_aggregated_recursive_actual_pbs_chain_root_proof, prove_actual_pbs,
+    prove_actual_pbs_chain_chunk, prove_actual_pbs_step, prove_actual_pbs_step_chain,
+    prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree, prove_mul_xai, prove_poly_mul,
     prove_recursive_actual_pbs_chain_chunk, prove_sample_extract,
+    serialize_aggregated_recursive_actual_pbs_chain_root_proof,
     verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
     verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
     verify_actual_pbs_step_proof,
@@ -718,8 +719,14 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
     let layer_count = proof.layer_count();
     let root_summary = proof.chain_summary.clone();
     let root_proof = proof.into_root_proof()?;
+    let root_proof_bytes = serialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof)?;
+    let decoded_root_proof =
+        deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof_bytes)?;
     let root_verify_started = Instant::now();
-    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(&root_summary, &root_proof)?;
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root_summary,
+        &decoded_root_proof,
+    )?;
     let root_verify_time = root_verify_started.elapsed();
     println!(
         "pbs-chain-tree aggregate recursive proof verified: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}, chain_summary_fields={}",
@@ -735,7 +742,7 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         chain_summary_fields
     );
     println!(
-        "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}, root_verify_ms={}, root_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}, root_verify_ms={}, root_verify_us={}, root_proof_bytes={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
         total_leaf_prove_time.as_millis(),
         total_leaf_prove_time.as_micros(),
         aggregate_time.as_millis(),
@@ -744,6 +751,7 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         verify_time.as_micros(),
         root_verify_time.as_millis(),
         root_verify_time.as_micros(),
+        root_proof_bytes.len(),
         max_base_private_inputs,
         max_recursive_public_inputs,
         format_coefficients(&bsk_digest),
