@@ -111,7 +111,7 @@ where
     }
 
     fn trace_generator(&self) -> TraceGeneratorFn<F> {
-        generate_range_check_trace::<F>
+        range_check_trace_generator(self.bit_count)
     }
 
     fn config(&self) -> NpoConfig {
@@ -154,8 +154,97 @@ pub fn parse_range_check_bit_count(op_type: &NpoTypeId) -> Option<usize> {
 }
 
 fn assert_valid_bit_count(bit_count: usize) {
-    assert!((1..=32).contains(&bit_count));
+    assert!((1..=63).contains(&bit_count));
 }
+
+macro_rules! define_range_check_trace_generators {
+    ($(($name:ident, $bit_count:literal)),+ $(,)?) => {
+        $(
+            fn $name<F>(op_states: &OpStateMap) -> Result<Option<Box<dyn NonPrimitiveTrace<F>>>, CircuitError>
+            where
+                F: Field + Clone + Send + Sync + 'static,
+            {
+                generate_range_check_trace_for_bit_count(op_states, $bit_count)
+            }
+        )+
+
+        fn range_check_trace_generator<F>(bit_count: usize) -> TraceGeneratorFn<F>
+        where
+            F: Field + Clone + Send + Sync + 'static,
+        {
+            match bit_count {
+                $($bit_count => $name::<F>,)+
+                _ => panic!("unsupported range-check bit count {bit_count}"),
+            }
+        }
+    };
+}
+
+define_range_check_trace_generators!(
+    (generate_range_check_trace_u1, 1),
+    (generate_range_check_trace_u2, 2),
+    (generate_range_check_trace_u3, 3),
+    (generate_range_check_trace_u4, 4),
+    (generate_range_check_trace_u5, 5),
+    (generate_range_check_trace_u6, 6),
+    (generate_range_check_trace_u7, 7),
+    (generate_range_check_trace_u8, 8),
+    (generate_range_check_trace_u9, 9),
+    (generate_range_check_trace_u10, 10),
+    (generate_range_check_trace_u11, 11),
+    (generate_range_check_trace_u12, 12),
+    (generate_range_check_trace_u13, 13),
+    (generate_range_check_trace_u14, 14),
+    (generate_range_check_trace_u15, 15),
+    (generate_range_check_trace_u16, 16),
+    (generate_range_check_trace_u17, 17),
+    (generate_range_check_trace_u18, 18),
+    (generate_range_check_trace_u19, 19),
+    (generate_range_check_trace_u20, 20),
+    (generate_range_check_trace_u21, 21),
+    (generate_range_check_trace_u22, 22),
+    (generate_range_check_trace_u23, 23),
+    (generate_range_check_trace_u24, 24),
+    (generate_range_check_trace_u25, 25),
+    (generate_range_check_trace_u26, 26),
+    (generate_range_check_trace_u27, 27),
+    (generate_range_check_trace_u28, 28),
+    (generate_range_check_trace_u29, 29),
+    (generate_range_check_trace_u30, 30),
+    (generate_range_check_trace_u31, 31),
+    (generate_range_check_trace_u32, 32),
+    (generate_range_check_trace_u33, 33),
+    (generate_range_check_trace_u34, 34),
+    (generate_range_check_trace_u35, 35),
+    (generate_range_check_trace_u36, 36),
+    (generate_range_check_trace_u37, 37),
+    (generate_range_check_trace_u38, 38),
+    (generate_range_check_trace_u39, 39),
+    (generate_range_check_trace_u40, 40),
+    (generate_range_check_trace_u41, 41),
+    (generate_range_check_trace_u42, 42),
+    (generate_range_check_trace_u43, 43),
+    (generate_range_check_trace_u44, 44),
+    (generate_range_check_trace_u45, 45),
+    (generate_range_check_trace_u46, 46),
+    (generate_range_check_trace_u47, 47),
+    (generate_range_check_trace_u48, 48),
+    (generate_range_check_trace_u49, 49),
+    (generate_range_check_trace_u50, 50),
+    (generate_range_check_trace_u51, 51),
+    (generate_range_check_trace_u52, 52),
+    (generate_range_check_trace_u53, 53),
+    (generate_range_check_trace_u54, 54),
+    (generate_range_check_trace_u55, 55),
+    (generate_range_check_trace_u56, 56),
+    (generate_range_check_trace_u57, 57),
+    (generate_range_check_trace_u58, 58),
+    (generate_range_check_trace_u59, 59),
+    (generate_range_check_trace_u60, 60),
+    (generate_range_check_trace_u61, 61),
+    (generate_range_check_trace_u62, 62),
+    (generate_range_check_trace_u63, 63),
+);
 
 #[derive(Clone)]
 struct RangeCheckExecutor<F> {
@@ -271,23 +360,36 @@ pub fn generate_range_check_trace<F>(
 where
     F: Field + Clone + Send + Sync + 'static,
 {
-    for (op_type, state) in op_states {
-        if parse_range_check_bit_count(op_type).is_none() {
-            continue;
+    for bit_count in 1..=63 {
+        if let Some(trace) = generate_range_check_trace_for_bit_count(op_states, bit_count)? {
+            return Ok(Some(trace));
         }
-        let Some(state) = state.downcast_ref::<RangeCheckExecutionState<F>>() else {
-            continue;
-        };
-        if state.rows.is_empty() {
-            continue;
-        }
-        return Ok(Some(Box::new(RangeCheckTrace {
-            op_type: op_type.clone(),
-            bit_count: state.bit_count,
-            rows: state.rows.clone(),
-        })));
     }
     Ok(None)
+}
+
+fn generate_range_check_trace_for_bit_count<F>(
+    op_states: &OpStateMap,
+    bit_count: usize,
+) -> Result<Option<Box<dyn NonPrimitiveTrace<F>>>, CircuitError>
+where
+    F: Field + Clone + Send + Sync + 'static,
+{
+    let op_type = range_check_type_id(bit_count);
+    let Some(state) = op_states.get(&op_type) else {
+        return Ok(None);
+    };
+    let Some(state) = state.downcast_ref::<RangeCheckExecutionState<F>>() else {
+        return Ok(None);
+    };
+    if state.rows.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(RangeCheckTrace {
+        op_type,
+        bit_count: state.bit_count,
+        rows: state.rows.clone(),
+    })))
 }
 
 #[cfg(test)]
@@ -339,5 +441,43 @@ mod tests {
             .unwrap();
 
         assert!(runner.run().is_err());
+    }
+
+    #[test]
+    fn range_check_generates_distinct_traces_for_multiple_bit_counts() {
+        let mut builder = CircuitBuilder::<Goldilocks>::new();
+        register_range_check_npo(&mut builder, 5);
+        register_range_check_npo(&mut builder, 46);
+        let small = builder.alloc_private_input("small_range_value");
+        let large = builder.alloc_private_input("large_range_value");
+        range_check_expr(&mut builder, small, 5);
+        range_check_expr(&mut builder, large, 46);
+        let sum = builder.add(small, large);
+        let expected = builder.public_input();
+        builder.connect(sum, expected);
+        let circuit = builder.build().unwrap();
+
+        let small_value = Goldilocks::from_u64(16);
+        let large_value = Goldilocks::from_u64(1u64 << 45);
+        let mut runner = circuit.runner();
+        runner
+            .set_public_inputs(&[small_value + large_value])
+            .unwrap();
+        runner
+            .set_private_inputs(&[small_value, large_value])
+            .unwrap();
+        let traces = runner.run().unwrap();
+
+        let small_trace = traces
+            .non_primitive_trace::<RangeCheckTrace<Goldilocks>>(&range_check_type_id(5))
+            .expect("u5 range-check trace should be generated");
+        let large_trace = traces
+            .non_primitive_trace::<RangeCheckTrace<Goldilocks>>(&range_check_type_id(46))
+            .expect("u46 range-check trace should be generated");
+
+        assert_eq!(small_trace.rows.len(), 1);
+        assert_eq!(small_trace.rows[0].value, small_value);
+        assert_eq!(large_trace.rows.len(), 1);
+        assert_eq!(large_trace.rows[0].value, large_value);
     }
 }

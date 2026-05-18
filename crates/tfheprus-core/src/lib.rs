@@ -17,7 +17,10 @@ pub mod serialization;
 
 pub use field::{Goldilocks, GOLDILOCKS_MODULUS};
 pub use ggsw::{external_product, external_product_ntt, GgswCiphertext, GgswCiphertextNtt};
-pub use glev::{decompose_polynomial, GlevCiphertext, GlevCiphertextNtt};
+pub use glev::{
+    decompose_polynomial, decompose_scalar, decomposition_gadget_factor, GlevCiphertext,
+    GlevCiphertextNtt,
+};
 pub use glwe::{sample_extract_index_zero, GlweCiphertext, GlweCiphertextNtt, GlweSecretKey};
 pub use keys::{EvaluationKey, EvaluationKeyNtt, SecretKey};
 pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};

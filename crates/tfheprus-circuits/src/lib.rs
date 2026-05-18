@@ -9,10 +9,10 @@ use p3_goldilocks::Goldilocks as P3Goldilocks;
 use range_check::{range_check_expr, register_range_check_npo};
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
-    bootstrap_without_keyswitch, decompose_polynomial, mod_switch_to_exponent, negacyclic_ntt,
-    primitive_power_of_two_root, sample_extract_index_zero, EvaluationKey, GgswCiphertext,
-    GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
-    GOLDILOCKS_TWO_ADICITY,
+    bootstrap_without_keyswitch, decompose_polynomial, decomposition_gadget_factor,
+    mod_switch_to_exponent, negacyclic_ntt, primitive_power_of_two_root, sample_extract_index_zero,
+    EvaluationKey, GgswCiphertext, GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext,
+    Params, Polynomial, TestPolynomial, GOLDILOCKS_MODULUS, GOLDILOCKS_TWO_ADICITY,
 };
 
 #[derive(Clone)]
@@ -330,6 +330,9 @@ pub fn build_actual_pbs_circuit(
 
     let mut builder = CircuitBuilder::<P3Goldilocks>::new();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
+    if let Some(error_bits) = decomposition_error_bits(&instance.params) {
+        register_range_check_npo(&mut builder, error_bits);
+    }
     let input_mask = builder.alloc_public_inputs(instance.params.lwe_dimension, "actual_pbs_mask");
     let input_body = builder.alloc_public_inputs(1, "actual_pbs_body");
     let test_poly =
@@ -418,9 +421,17 @@ fn append_decomposition_private_inputs(
 ) {
     let digits = decompose_polynomial(params, poly);
     for coeff_index in 0..poly.len() {
-        for digit_poly in &digits {
-            let digit = digit_poly[coeff_index];
-            inputs.push(core_to_p3(digit));
+        let mut reconstructed = Goldilocks::ZERO;
+        for (level_index, digit_poly) in digits.iter().enumerate() {
+            let signed_digit = digit_poly[coeff_index];
+            inputs.push(core_to_p3(private_digit_input(params, signed_digit)));
+            reconstructed += signed_digit * decomposition_gadget_factor(params, level_index);
+        }
+        if decomposition_error_bits(params).is_some() {
+            let error = poly[coeff_index] - reconstructed;
+            let (magnitude, sign_bit) = signed_magnitude(error);
+            inputs.push(core_to_p3(magnitude));
+            inputs.push(P3Goldilocks::from_u64(sign_bit));
         }
     }
 }
@@ -429,6 +440,47 @@ fn append_torus_decomposition_private_inputs(value: Goldilocks, inputs: &mut Vec
     for bit_index in 0..64 {
         let bit = (value.value() >> bit_index) & 1;
         inputs.push(P3Goldilocks::from_u64(bit));
+    }
+}
+
+fn private_digit_input(params: &Params, signed_digit: Goldilocks) -> Goldilocks {
+    if uses_exact_binary_decomposition(params) {
+        signed_digit
+    } else {
+        let half_base = 1u64 << (params.decomposition_base_log - 1);
+        let signed = small_signed_value(signed_digit);
+        Goldilocks::from_u64((signed + half_base as i64) as u64)
+    }
+}
+
+fn small_signed_value(value: Goldilocks) -> i64 {
+    let canonical = value.value();
+    if canonical <= i64::MAX as u64 {
+        canonical as i64
+    } else {
+        -((GOLDILOCKS_MODULUS - canonical) as i64)
+    }
+}
+
+fn signed_magnitude(value: Goldilocks) -> (Goldilocks, u64) {
+    let canonical = value.value();
+    if canonical <= GOLDILOCKS_MODULUS / 2 {
+        (value, 0)
+    } else {
+        (Goldilocks::from_u64(GOLDILOCKS_MODULUS - canonical), 1)
+    }
+}
+
+fn uses_exact_binary_decomposition(params: &Params) -> bool {
+    params.decomposition_base_log * params.decomposition_level_count == 64
+}
+
+fn decomposition_error_bits(params: &Params) -> Option<usize> {
+    if uses_exact_binary_decomposition(params) {
+        None
+    } else {
+        let dropped_bits = 64 - params.decomposition_base_log * params.decomposition_level_count;
+        Some((dropped_bits + 2).min(63))
     }
 }
 
@@ -539,17 +591,53 @@ fn decompose_poly_expr(
     for (coeff_index, &coeff) in poly.iter().enumerate() {
         let mut reconstructed = zero;
         for (level_index, level) in levels.iter_mut().enumerate() {
-            let digit = builder.alloc_private_input("decomp_digit");
-            range_check_expr(builder, digit, params.decomposition_base_log);
-            let scale = Goldilocks::from_u64(1u64 << (params.decomposition_base_log * level_index));
-            let scale_const = builder.define_const(core_to_p3(scale));
-            let scaled_digit = builder.mul(digit, scale_const);
+            let raw_digit = builder.alloc_private_input("decomp_digit");
+            range_check_expr(builder, raw_digit, params.decomposition_base_log);
+            let digit = signed_digit_expr(builder, params, raw_digit);
+            let factor = decomposition_gadget_factor(params, level_index);
+            let scaled_digit = mul_const_expr(builder, digit, factor);
             reconstructed = builder.add(reconstructed, scaled_digit);
             level[coeff_index] = digit;
         }
+        let reconstructed = add_approximation_error_expr(builder, params, reconstructed);
         builder.connect(coeff, reconstructed);
     }
     levels
+}
+
+fn signed_digit_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+    raw_digit: ExprId,
+) -> ExprId {
+    if uses_exact_binary_decomposition(params) {
+        raw_digit
+    } else {
+        let half_base = Goldilocks::from_u64(1u64 << (params.decomposition_base_log - 1));
+        let neg_half_const = builder.define_const(core_to_p3(-half_base));
+        builder.add(raw_digit, neg_half_const)
+    }
+}
+
+fn add_approximation_error_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+    reconstructed: ExprId,
+) -> ExprId {
+    let Some(error_bits) = decomposition_error_bits(params) else {
+        return reconstructed;
+    };
+
+    let error_magnitude = builder.alloc_private_input("decomp_error_magnitude");
+    range_check_expr(builder, error_magnitude, error_bits);
+    let error_sign = builder.alloc_private_input("decomp_error_sign");
+    builder.assert_bool(error_sign);
+
+    let doubled_error = mul_const_expr(builder, error_magnitude, Goldilocks::from_u64(2));
+    let signed_correction = builder.mul(error_sign, doubled_error);
+    let neg_signed_correction = mul_const_expr(builder, signed_correction, -Goldilocks::ONE);
+    let signed_error = builder.add(error_magnitude, neg_signed_correction);
+    builder.add(reconstructed, signed_error)
 }
 
 fn mod_switch_exponent_bits_expr(
@@ -982,6 +1070,16 @@ mod tests {
     #[test]
     fn actual_pbs_circuit_runs_against_native_instance() {
         let params = Params::new(1, 4, 1, 16, 4, 4);
+        run_actual_pbs_circuit_with_params(params);
+    }
+
+    #[test]
+    fn actual_pbs_circuit_runs_with_approximate_decomposition() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        run_actual_pbs_circuit_with_params(params);
+    }
+
+    fn run_actual_pbs_circuit_with_params(params: Params) {
         let input_message = 1;
         let output_message = 3;
         let mask_step = tfheprus_core::GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;

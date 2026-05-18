@@ -392,6 +392,16 @@ mod tests {
     #[test]
     fn proves_and_verifies_actual_toy_pbs_with_nonzero_mask() {
         let params = Params::toy();
+        proves_and_verifies_actual_pbs_with_params(params);
+    }
+
+    #[test]
+    fn proves_and_verifies_actual_pbs_with_approximate_decomposition() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        proves_and_verifies_actual_pbs_with_params(params);
+    }
+
+    fn proves_and_verifies_actual_pbs_with_params(params: Params) {
         let mut rng = ChaCha20Rng::seed_from_u64(101);
         let sk = SecretKey::generate(&params, &mut rng);
         let ek = EvaluationKey::generate(&params, &sk, &mut rng);

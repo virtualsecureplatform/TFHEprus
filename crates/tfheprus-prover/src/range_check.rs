@@ -40,7 +40,7 @@ impl<F: Field + PrimeCharacteristicRing> RangeCheckAir<F> {
         preprocessed: Vec<F>,
         min_height: usize,
     ) -> Self {
-        assert!((1..=32).contains(&bit_count));
+        assert!((1..=63).contains(&bit_count));
         Self {
             bit_count,
             lanes: lanes.max(1),
