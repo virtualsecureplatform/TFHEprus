@@ -34,9 +34,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 circuit for public `mul_xai`, the negacyclic monomial rotation used
   by blind rotation.
 - Plonky3 circuit for public GLWE index-zero sample extraction to LWE.
-- Plonky3 PBS PoC for the native trivial-mask `bootstrap_without_keyswitch`
-  path. This proves the all-zero LWE mask path that rotates the test polynomial
-  by the body-derived exponent and sample-extracts the accumulator.
+- Plonky3 PBS PoC for the native nonzero-mask `bootstrap_without_keyswitch`
+  path. This includes `mul_xai`, CMUX, GGSW external product, exact gadget
+  decomposition with in-circuit bit range checks, and sample extraction.
 - Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
@@ -44,16 +44,18 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
-cargo run -p tfheprus-cli -- prove-trivial-pbs
-cargo run -p tfheprus-cli -- prove-paper-pbs
+cargo run -p tfheprus-cli -- run-actual-pbs-native
+cargo run -p tfheprus-cli -- prove-actual-pbs
 ```
 
-`prove-paper-pbs` uses `Params::paper_v1()` and reports measured prove/verify
-times. The reference paper reports 18 minutes prover time and 8 ms verifier time
-on an Hpc7a.96xlarge for its full PBS implementation. This command is the
-current trivial-mask PBS PoC at the same parameter shape; on the current runner,
-`cargo run --release -p tfheprus-cli -- prove-paper-pbs` completed with
-`prove_ms=125` and `verify_ms=6`.
+The current actual PBS proof uses `Params::toy()` while exercising every LWE
+mask rotation. The previous all-zero-mask proof path was removed because it
+skipped CMUX/external-product work.
+
+On the current runner, `cargo run --release -p tfheprus-cli --
+run-actual-pbs-native` completed the native PBS in `native_us=38`, and
+`cargo run --release -p tfheprus-cli -- prove-actual-pbs` completed with
+`prove_us=768595` and `verify_us=7453`.
 
 ## Validation
 

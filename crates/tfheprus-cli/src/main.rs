@@ -2,16 +2,18 @@ use std::env;
 use std::error::Error;
 use std::time::Instant;
 
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance, TrivialPbsInstance,
+    ActualPbsInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::{
-    decode_message, encode_message, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial,
-    TestPolynomial,
+    bootstrap_without_keyswitch, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext, Params,
+    Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
-    prove_mul_xai, prove_poly_mul, prove_sample_extract, prove_trivial_pbs, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_sample_extract_proof, verify_trivial_pbs_proof,
+    prove_actual_pbs, prove_mul_xai, prove_poly_mul, prove_sample_extract, verify_actual_pbs_proof,
+    verify_mul_xai_proof, verify_poly_mul_proof, verify_sample_extract_proof,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -20,8 +22,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-poly-mul") => prove_poly_mul_demo()?,
         Some("prove-mul-xai") => prove_mul_xai_demo()?,
         Some("prove-sample-extract") => prove_sample_extract_demo()?,
-        Some("prove-trivial-pbs") => prove_trivial_pbs_demo()?,
-        Some("prove-paper-pbs") => prove_paper_pbs_demo()?,
+        Some("prove-actual-pbs") => prove_actual_pbs_demo()?,
+        Some("run-actual-pbs-native") => run_actual_pbs_native_demo(),
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -104,52 +106,91 @@ fn prove_sample_extract_demo() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn prove_trivial_pbs_demo() -> Result<(), Box<dyn Error>> {
-    prove_pbs_demo("trivial-pbs", Params::toy())
-}
-
-fn prove_paper_pbs_demo() -> Result<(), Box<dyn Error>> {
-    prove_pbs_demo("paper-pbs", Params::paper_v1())
-}
-
-fn prove_pbs_demo(label: &str, params: Params) -> Result<(), Box<dyn Error>> {
-    let input_message = 1;
-    let output_message = 3;
-    let input = LweCiphertext {
-        mask: vec![Goldilocks::ZERO; params.lwe_dimension],
-        body: encode_message(&params, input_message),
-    };
-    let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
-    let instance = TrivialPbsInstance::new(params.clone(), input, test_polynomial);
-
+fn prove_actual_pbs_demo() -> Result<(), Box<dyn Error>> {
+    let (params, sk, instance) = actual_pbs_instance();
     let prove_started = Instant::now();
-    let proof = prove_trivial_pbs(&instance)?;
+    let proof = prove_actual_pbs(&instance)?;
     let prove_time = prove_started.elapsed();
 
     let verify_started = Instant::now();
-    verify_trivial_pbs_proof(&instance, &proof)?;
+    verify_actual_pbs_proof(&instance, &proof)?;
     let verify_time = verify_started.elapsed();
 
     println!(
-        "{label} proof verified: lwe_dimension={}, glwe_dimension={}, degree={}, initial_exponent={}, public_inputs={}",
+        "actual-pbs proof verified: lwe_dimension={}, glwe_dimension={}, degree={}, nonzero_rotations={}, public_inputs={}",
         proof.params.lwe_dimension,
         proof.params.glwe_dimension,
         proof.params.polynomial_size,
-        proof.initial_exponent,
+        proof.nonzero_rotation_count,
         proof.public_inputs.len()
     );
     println!(
-        "prove_ms={}, verify_ms={}",
+        "prove_ms={}, prove_us={}, verify_ms={}, verify_us={}",
         prove_time.as_millis(),
-        verify_time.as_millis()
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
     );
     println!(
         "input_message={}, output_message={}",
-        input_message,
-        decode_message(&params, instance.output.body)
+        1,
+        instance
+            .output
+            .decrypt(&params, &sk.extracted_output_lwe_key())
     );
 
     Ok(())
+}
+
+fn run_actual_pbs_native_demo() {
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials();
+
+    let started = Instant::now();
+    let output = bootstrap_without_keyswitch(&params, &evaluation_key, &input, &test_polynomial);
+    let native_time = started.elapsed();
+
+    println!(
+        "actual-pbs native run: lwe_dimension={}, glwe_dimension={}, degree={}",
+        params.lwe_dimension, params.glwe_dimension, params.polynomial_size
+    );
+    println!(
+        "native_ms={}, native_us={}",
+        native_time.as_millis(),
+        native_time.as_micros()
+    );
+    println!(
+        "input_message={}, output_message={}",
+        1,
+        output.decrypt(&params, &sk.extracted_output_lwe_key())
+    );
+}
+
+fn actual_pbs_instance() -> (Params, SecretKey, ActualPbsInstance) {
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials();
+    let instance = ActualPbsInstance::new(params.clone(), input, test_polynomial, evaluation_key);
+    (params, sk, instance)
+}
+
+fn actual_pbs_materials() -> (
+    Params,
+    SecretKey,
+    EvaluationKey,
+    LweCiphertext,
+    TestPolynomial,
+) {
+    let params = Params::toy();
+    let mut rng = ChaCha20Rng::seed_from_u64(101);
+    let sk = SecretKey::generate(&params, &mut rng);
+    let evaluation_key = EvaluationKey::generate(&params, &sk, &mut rng);
+    let input_message = 1;
+    let output_message = 3;
+    let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+    let mask = (0..params.lwe_dimension)
+        .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+        .collect();
+    let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+    let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+    (params, sk, evaluation_key, input, test_polynomial)
 }
 
 fn polynomial(coeffs: &[u64]) -> Polynomial {
@@ -177,6 +218,6 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-trivial-pbs|prove-paper-pbs]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-actual-pbs|run-actual-pbs-native]"
     );
 }

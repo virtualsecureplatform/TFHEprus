@@ -110,7 +110,7 @@ mod tests {
     use crate::lwe::LweCiphertext;
 
     #[test]
-    fn trivial_mask_bootstrap_applies_single_slot_test_polynomial() {
+    fn nonzero_mask_bootstrap_applies_single_slot_test_polynomial() {
         let params = Params::toy();
         let mut rng = ChaCha20Rng::seed_from_u64(30);
         let sk = SecretKey::generate(&params, &mut rng);
@@ -118,7 +118,11 @@ mod tests {
         let input_message = 1;
         let output_message = 3;
         let test_poly = TestPolynomial::single_slot(&params, input_message, output_message);
-        let input = LweCiphertext::encrypt_trivial(&params, &sk.input_lwe, input_message);
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
         let output = bootstrap_without_keyswitch(&params, &ek, &input, &test_poly);
         assert_eq!(
             output.decrypt(&params, &sk.extracted_output_lwe_key()),
