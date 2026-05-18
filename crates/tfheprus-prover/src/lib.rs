@@ -18,9 +18,10 @@ use range_check::{
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use tfheprus_circuits::{
-    build_actual_pbs_circuit, build_actual_pbs_step_circuit, build_mul_xai_circuit,
-    build_poly_mul_circuit, build_sample_extract_circuit, ActualPbsInstance, ActualPbsStepInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    build_actual_pbs_circuit, build_actual_pbs_step_circuit, build_actual_pbs_step_private_circuit,
+    build_mul_xai_circuit, build_poly_mul_circuit, build_sample_extract_circuit, ActualPbsInstance,
+    ActualPbsStepInstance, ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance,
+    SampleExtractInstance,
 };
 use tfheprus_core::Params;
 
@@ -59,6 +60,13 @@ pub struct ActualPbsStepProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+pub struct ActualPbsStepPrivateProof {
+    pub params: Params,
+    pub exponent: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofError {
     StatementMismatch,
@@ -81,6 +89,7 @@ pub type MulXaiProofError = ProofError;
 pub type SampleExtractProofError = ProofError;
 pub type ActualPbsProofError = ProofError;
 pub type ActualPbsStepProofError = ProofError;
+pub type ActualPbsStepPrivateProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -251,6 +260,44 @@ pub fn prove_and_verify_actual_pbs_step(
 ) -> Result<(), ProofError> {
     let proof = prove_actual_pbs_step(instance)?;
     verify_actual_pbs_step_proof(instance, &proof)
+}
+
+pub fn prove_actual_pbs_step_private(
+    instance: &ActualPbsStepPrivateInstance,
+) -> Result<ActualPbsStepPrivateProof, ProofError> {
+    let circuit = build_actual_pbs_step_private_circuit(instance)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.public_inputs();
+    let private_inputs = instance.private_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs, &private_inputs)?;
+
+    Ok(ActualPbsStepPrivateProof {
+        params: instance.params.clone(),
+        exponent: instance.exponent,
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn verify_actual_pbs_step_private_proof(
+    instance: &ActualPbsStepPrivateInstance,
+    proof: &ActualPbsStepPrivateProof,
+) -> Result<(), ProofError> {
+    if proof.params != instance.params
+        || proof.exponent != instance.exponent
+        || proof.public_inputs != instance.public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
+}
+
+pub fn prove_and_verify_actual_pbs_step_private(
+    instance: &ActualPbsStepPrivateInstance,
+) -> Result<(), ProofError> {
+    let proof = prove_actual_pbs_step_private(instance)?;
+    verify_actual_pbs_step_private_proof(instance, &proof)
 }
 
 fn prove_circuit(
@@ -509,6 +556,44 @@ mod tests {
         let params = Params::new(1, 4, 1, 5, 4, 4);
         let instance = actual_pbs_step_instance_with_params(params);
         prove_and_verify_actual_pbs_step(&instance).unwrap();
+    }
+
+    #[test]
+    fn proves_and_verifies_private_actual_pbs_step_with_approximate_decomposition() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let public_instance = actual_pbs_step_instance_with_params(params);
+        let private_instance = ActualPbsStepPrivateInstance::new(
+            public_instance.params.clone(),
+            public_instance.mask_value,
+            public_instance.input_accumulator.clone(),
+            public_instance.selector.clone(),
+        );
+        assert_eq!(
+            private_instance.output_accumulator,
+            public_instance.output_accumulator
+        );
+
+        prove_and_verify_actual_pbs_step_private(&private_instance).unwrap();
+    }
+
+    #[test]
+    fn rejects_private_actual_pbs_step_digest_mismatch() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let public_instance = actual_pbs_step_instance_with_params(params);
+        let instance = ActualPbsStepPrivateInstance::new(
+            public_instance.params.clone(),
+            public_instance.mask_value,
+            public_instance.input_accumulator.clone(),
+            public_instance.selector.clone(),
+        );
+        let proof = prove_actual_pbs_step_private(&instance).unwrap();
+        let mut other_instance = instance.clone();
+        other_instance.selector_digest[0] += Goldilocks::ONE;
+
+        assert_eq!(
+            verify_actual_pbs_step_private_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
     }
 
     fn proves_and_verifies_actual_pbs_with_params(params: Params) {

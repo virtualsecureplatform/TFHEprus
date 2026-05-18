@@ -43,6 +43,11 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   reconstruction error, table-backed range checks, and sample extraction.
 - Plonky3 PBS-step PoC for a single blind-rotation CMUX iteration. This is the
   current leaf circuit for the recursive/chunked PBS direction.
+- Plonky3 private-selector PBS-step PoC. The selected GGSW ciphertext is now a
+  private witness in this leaf, with a small public algebraic digest binding the
+  NTT-domain selector used by CMUX. This matches the paper direction of keeping
+  bootstrapping-key material private behind compact public commitments, although
+  it is not yet the final recursive Poseidon/hash-chain construction.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -60,6 +65,7 @@ cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
+cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -111,6 +117,16 @@ blind-rotation CMUX step with `public_inputs=20481`, `prove_us=11879152`, and
 `verify_us=18639`. This is not yet a full recursive PBS proof; it is the leaf
 proof needed before adding recursive verification and hash-chain binding across
 all 728 steps.
+
+The private-selector step is the next leaf shape for paper-style recursion:
+`cargo run --release -p tfheprus-cli -- prove-pbs-step-private paper-v1` makes
+the selected GGSW ciphertext private and replaces its 16384 public NTT
+coefficients with a 4-field public digest. On the current runner it verified
+with `public_inputs=4101`, `private_inputs=28736`, `prove_us=23295556`, and
+`verify_us=18995`. The digest is an in-circuit Goldilocks algebraic sponge used
+to prove the statement shape and public-value binding. A production security
+path still needs the recursive hash-chain design from the paper, preferably with
+the Plonky3 recursion hash used by the verifier.
 
 ## Validation
 
