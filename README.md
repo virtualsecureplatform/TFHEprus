@@ -58,6 +58,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   verifies the verifier for a real private-mask/private-selector PBS chunk
   proof, using a TFHEprus-local Goldilocks STARK config with Merkle cap height
   zero while the capped recursive MMCS path is hardened.
+- Chunked recursive PBS prefix driver. Consecutive chunks carry forward the
+  accumulator, BSK digest, and ciphertext-mask digest, so the proof list can
+  cover a prefix or the full blind rotation without regenerating keys per chunk.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -79,6 +82,8 @@ cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-chain-chunk paper-v1 2
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-chunk-recursive toy 1
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-prefix-recursive toy 2
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-prefix-recursive paper-v1 2 4
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -159,15 +164,27 @@ The recursive verifier path is live for the chained chunk statement:
 proved and verified the recursive verifier for one actual PBS chunk step with
 `base_public_inputs=48`, `base_private_inputs=257`,
 `recursive_public_inputs=107`, `prove_us=5994080`, and `verify_us=93789`.
-This is the first end-to-end prove/verify recursion smoke for the real PBS leaf,
-but not yet a paper-v1 recursive run.
+Paper-shaped recursive chunk proofs also run: `paper-v1 1` verified with
+`recursive_public_inputs=4194`, `prove_us=35095520`, and `verify_us=231143`;
+`paper-v1 2` verified with `base_private_inputs=57474`, `prove_us=58362432`,
+and `verify_us=261047`.
 
-Remaining gap to paper-param PBS: run recursion on paper-shaped chunk proofs,
-choose practical chunk sizes and aggregation depth for all 728 blind-rotation
-steps, replace the current PoC digest with the final paper-style hash/commitment
-chain, harden recursive MMCS verification for capped Merkle commitments, and
-add the final TFHE key-switch if the target statement needs ciphertexts under
-the original output LWE key.
+The chunked recursive prefix driver verifies consecutive recursive chunk proofs
+while carrying accumulator and digest-chain state across chunk boundaries.
+`cargo run --release -p tfheprus-cli -- prove-pbs-chain-prefix-recursive toy 2`
+covered all 8 toy blind-rotation steps as 4 recursive chunks and matched the
+native NTT PBS output, decrypting `full_prefix_output_message=3`. It took
+`total_prove_us=24220579` and `total_verify_us=380389`. The paper-shaped prefix
+smoke `paper-v1 2 4` covered 4 consecutive steps as 2 recursive chunks with
+`total_prove_us=117131533`, `total_verify_us=487465`,
+`max_base_private_inputs=57474`, and `max_recursive_public_inputs=4194`.
+
+Remaining gap to paper-param PBS: run or schedule the full 728-step
+paper-v1 prefix, aggregate the recursive chunk proofs into one succinct final
+proof instead of a proof list, replace the current PoC digest with the final
+paper-style hash/commitment chain, harden recursive MMCS verification for capped
+Merkle commitments, and add the final TFHE key-switch if the target statement
+needs ciphertexts under the original output LWE key.
 
 ## Validation
 

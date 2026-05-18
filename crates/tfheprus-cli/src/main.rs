@@ -1,6 +1,6 @@
 use std::env;
 use std::error::Error;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -10,8 +10,9 @@ use tfheprus_circuits::{
     ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::{
-    bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, EvaluationKey, GlweCiphertext,
-    Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
+    bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, sample_extract_index_zero,
+    EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial, SecretKey,
+    TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
     prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
@@ -41,6 +42,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-pbs-chain-chunk-recursive") => prove_pbs_chain_chunk_recursive_demo(
             parse_preset_arg(&args)?,
             parse_chunk_step_count_arg(&args)?,
+        )?,
+        Some("prove-pbs-chain-prefix-recursive") => prove_pbs_chain_prefix_recursive_demo(
+            parse_preset_arg(&args)?,
+            parse_chunk_step_count_arg(&args)?,
+            parse_optional_total_step_count_arg(&args)?,
         )?,
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
@@ -371,6 +377,115 @@ fn prove_pbs_chain_chunk_recursive_demo(
     Ok(())
 }
 
+fn prove_pbs_chain_prefix_recursive_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    requested_total_steps: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    let total_steps = requested_total_steps.unwrap_or(params.lwe_dimension);
+    if total_steps == 0 || total_steps > params.lwe_dimension {
+        return Err(format!(
+            "total step count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let mut accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let mut bsk_digest = pbs_bsk_digest_initial();
+    let mut mask_digest = pbs_mask_digest_initial();
+    let mut total_prove_time = Duration::ZERO;
+    let mut total_verify_time = Duration::ZERO;
+    let mut chunk_count = 0usize;
+    let mut max_base_public_inputs = 0usize;
+    let mut max_base_private_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+
+    for chunk_start in (0..total_steps).step_by(chunk_step_count) {
+        let chunk_end = (chunk_start + chunk_step_count).min(total_steps);
+        let instance = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[chunk_start..chunk_end].to_vec(),
+            accumulator.clone(),
+            evaluation_key.bootstrapping_key[chunk_start..chunk_end].to_vec(),
+            bsk_digest,
+            mask_digest,
+        );
+        let base_public_inputs = instance.public_inputs().len();
+        let base_private_inputs = instance.private_inputs().len();
+
+        let prove_started = Instant::now();
+        let proof = prove_recursive_actual_pbs_chain_chunk(&instance)?;
+        let prove_time = prove_started.elapsed();
+
+        let verify_started = Instant::now();
+        verify_recursive_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+        let verify_time = verify_started.elapsed();
+
+        println!(
+            "pbs-chain-prefix recursive chunk verified: preset={}, chunk={}, steps={}..{}, prove_us={}, verify_us={}, base_public_inputs={}, base_private_inputs={}, recursive_public_inputs={}",
+            preset.name(),
+            chunk_count,
+            chunk_start,
+            chunk_end,
+            prove_time.as_micros(),
+            verify_time.as_micros(),
+            base_public_inputs,
+            base_private_inputs,
+            proof.recursion.public_input_count()
+        );
+
+        total_prove_time += prove_time;
+        total_verify_time += verify_time;
+        chunk_count += 1;
+        max_base_public_inputs = max_base_public_inputs.max(base_public_inputs);
+        max_base_private_inputs = max_base_private_inputs.max(base_private_inputs);
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(proof.recursion.public_input_count());
+        accumulator = instance.output_accumulator;
+        bsk_digest = instance.bsk_digest_out;
+        mask_digest = instance.mask_digest_out;
+    }
+
+    if total_steps == params.lwe_dimension {
+        let evaluation_key_ntt = evaluation_key.to_ntt();
+        let native_output =
+            bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+        let chunked_output = sample_extract_index_zero(&accumulator);
+        assert_eq!(chunked_output, native_output);
+        println!(
+            "full_prefix_output_message={}",
+            chunked_output.decrypt(&params, &sk.extracted_output_lwe_key())
+        );
+    }
+
+    println!(
+        "pbs-chain-prefix recursive proof list verified: preset={}, total_steps={}, chunk_step_count={}, chunks={}, total_prove_ms={}, total_prove_us={}, total_verify_ms={}, total_verify_us={}, max_base_public_inputs={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        preset.name(),
+        total_steps,
+        chunk_step_count,
+        chunk_count,
+        total_prove_time.as_millis(),
+        total_prove_time.as_micros(),
+        total_verify_time.as_millis(),
+        total_verify_time.as_micros(),
+        max_base_public_inputs,
+        max_base_private_inputs,
+        max_recursive_public_inputs,
+        format_coefficients(&bsk_digest),
+        format_coefficients(&mask_digest)
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -566,7 +681,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -627,6 +742,19 @@ fn parse_chunk_step_count_arg(args: &[String]) -> Result<usize, Box<dyn Error>> 
                 return Err("chunk step count must be nonzero".into());
             }
             Ok(parsed)
+        }
+    }
+}
+
+fn parse_optional_total_step_count_arg(args: &[String]) -> Result<Option<usize>, Box<dyn Error>> {
+    match args.get(4) {
+        None => Ok(None),
+        Some(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("total step count must be nonzero".into());
+            }
+            Ok(Some(parsed))
         }
     }
 }
