@@ -5,7 +5,8 @@ use p3_circuit::CircuitBuilder;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use tfheprus_core::{
-    sample_extract_index_zero, GlweCiphertext, Goldilocks, LweCiphertext, Polynomial,
+    mod_switch_to_exponent, sample_extract_index_zero, GlweCiphertext, Goldilocks, LweCiphertext,
+    Params, Polynomial, TestPolynomial,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +99,73 @@ impl SampleExtractInstance {
         inputs.extend(self.glwe.body.coeffs().iter().copied().map(core_to_p3));
         inputs.extend(self.lwe.mask.iter().copied().map(core_to_p3));
         inputs.push(core_to_p3(self.lwe.body));
+        inputs
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrivialPbsInstance {
+    pub params: Params,
+    pub input: LweCiphertext,
+    pub test_polynomial: TestPolynomial,
+    pub output: LweCiphertext,
+    pub initial_exponent: usize,
+}
+
+impl TrivialPbsInstance {
+    pub fn new(params: Params, input: LweCiphertext, test_polynomial: TestPolynomial) -> Self {
+        assert_eq!(input.mask.len(), params.lwe_dimension);
+        assert_eq!(test_polynomial.poly.len(), params.polynomial_size);
+        assert!(
+            input.mask.iter().all(|&value| value == Goldilocks::ZERO),
+            "trivial PBS PoC requires an all-zero LWE mask"
+        );
+
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+        let output = sample_extract_index_zero(&accumulator);
+
+        Self {
+            params,
+            input,
+            test_polynomial,
+            output,
+            initial_exponent,
+        }
+    }
+
+    pub fn public_inputs(&self) -> Vec<P3Goldilocks> {
+        assert_eq!(self.input.mask.len(), self.params.lwe_dimension);
+        assert_eq!(self.test_polynomial.poly.len(), self.params.polynomial_size);
+        assert_eq!(
+            self.output.mask.len(),
+            self.params.glwe_dimension * self.params.polynomial_size
+        );
+
+        let mut inputs = Vec::with_capacity(
+            self.params.lwe_dimension
+                + 1
+                + self.params.polynomial_size
+                + self.output.mask.len()
+                + 1,
+        );
+        inputs.extend(self.input.mask.iter().copied().map(core_to_p3));
+        inputs.push(core_to_p3(self.input.body));
+        inputs.extend(
+            self.test_polynomial
+                .poly
+                .coeffs()
+                .iter()
+                .copied()
+                .map(core_to_p3),
+        );
+        inputs.extend(self.output.mask.iter().copied().map(core_to_p3));
+        inputs.push(core_to_p3(self.output.body));
         inputs
     }
 }
@@ -198,6 +266,57 @@ pub fn build_sample_extract_circuit(
     Ok(builder.build()?)
 }
 
+pub fn build_trivial_pbs_circuit(
+    params: &Params,
+    initial_exponent: usize,
+    input_body: Goldilocks,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert!(params.polynomial_size > 0);
+    assert!(params.polynomial_size.is_power_of_two());
+    assert!(params.lwe_dimension > 0);
+    assert!(params.glwe_dimension > 0);
+
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let input_mask = builder.alloc_public_inputs(params.lwe_dimension, "pbs_input_mask");
+    let input_body_cell = builder.alloc_public_inputs(1, "pbs_input_body");
+    let test_poly = builder.alloc_public_inputs(params.polynomial_size, "pbs_test_poly");
+    let output_mask = builder.alloc_public_inputs(
+        params.glwe_dimension * params.polynomial_size,
+        "pbs_output_mask",
+    );
+    let output_body = builder.alloc_public_inputs(1, "pbs_output_body");
+
+    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let one = builder.define_const(P3Goldilocks::ONE);
+    let expected_input_body = builder.define_const(core_to_p3(input_body));
+    for cell in input_mask {
+        let must_be_one = builder.add(cell, one);
+        builder.connect(must_be_one, one);
+    }
+    builder.connect(input_body_cell[0], expected_input_body);
+
+    let mut rotated = vec![zero; params.polynomial_size];
+    let modulus = params.exponent_modulus();
+    let initial_exponent = initial_exponent % modulus;
+    for (i, &cell) in test_poly.iter().enumerate() {
+        let target = (i + initial_exponent) % modulus;
+        if target < params.polynomial_size {
+            rotated[target] = builder.add(rotated[target], cell);
+        } else {
+            rotated[target - params.polynomial_size] =
+                builder.sub(rotated[target - params.polynomial_size], cell);
+        }
+    }
+
+    for cell in output_mask {
+        let must_be_one = builder.add(cell, one);
+        builder.connect(must_be_one, one);
+    }
+    builder.connect(rotated[0], output_body[0]);
+
+    Ok(builder.build()?)
+}
+
 pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
@@ -242,6 +361,28 @@ mod tests {
         let instance = SampleExtractInstance::new(glwe);
         let circuit =
             build_sample_extract_circuit(instance.glwe_dimension(), instance.degree()).unwrap();
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner.run().unwrap();
+    }
+
+    #[test]
+    fn trivial_pbs_circuit_runs_against_native_instance() {
+        let params = Params::toy();
+        let input_message = 1;
+        let output_message = 3;
+        let input = LweCiphertext {
+            mask: vec![Goldilocks::ZERO; params.lwe_dimension],
+            body: tfheprus_core::encode_message(&params, input_message),
+        };
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let instance = TrivialPbsInstance::new(params, input, test_polynomial);
+        let circuit = build_trivial_pbs_circuit(
+            &instance.params,
+            instance.initial_exponent,
+            instance.input.body,
+        )
+        .unwrap();
         let mut runner = circuit.runner();
         runner.set_public_inputs(&instance.public_inputs()).unwrap();
         runner.run().unwrap();

@@ -34,6 +34,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 circuit for public `mul_xai`, the negacyclic monomial rotation used
   by blind rotation.
 - Plonky3 circuit for public GLWE index-zero sample extraction to LWE.
+- Plonky3 PBS PoC for the native trivial-mask `bootstrap_without_keyswitch`
+  path. This proves the all-zero LWE mask path that rotates the test polynomial
+  by the body-derived exponent and sample-extracts the accumulator.
 - Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
@@ -41,6 +44,7 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
+cargo run -p tfheprus-cli -- prove-trivial-pbs
 ```
 
 ## Validation

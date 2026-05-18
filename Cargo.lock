@@ -833,6 +833,8 @@ dependencies = [
  "p3-circuit-prover",
  "p3-field",
  "p3-goldilocks",
+ "rand 0.8.6",
+ "rand_chacha",
  "tfheprus-circuits",
  "tfheprus-core",
 ]

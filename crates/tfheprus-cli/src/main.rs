@@ -1,11 +1,16 @@
 use std::env;
 use std::error::Error;
 
-use tfheprus_circuits::{MulXaiInstance, PolyMulInstance, SampleExtractInstance};
-use tfheprus_core::{GlweCiphertext, Goldilocks, Params, Polynomial};
+use tfheprus_circuits::{
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance, TrivialPbsInstance,
+};
+use tfheprus_core::{
+    decode_message, encode_message, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial,
+    TestPolynomial,
+};
 use tfheprus_prover::{
-    prove_mul_xai, prove_poly_mul, prove_sample_extract, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_sample_extract_proof,
+    prove_mul_xai, prove_poly_mul, prove_sample_extract, prove_trivial_pbs, verify_mul_xai_proof,
+    verify_poly_mul_proof, verify_sample_extract_proof, verify_trivial_pbs_proof,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -14,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-poly-mul") => prove_poly_mul_demo()?,
         Some("prove-mul-xai") => prove_mul_xai_demo()?,
         Some("prove-sample-extract") => prove_sample_extract_demo()?,
+        Some("prove-trivial-pbs") => prove_trivial_pbs_demo()?,
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -96,6 +102,37 @@ fn prove_sample_extract_demo() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn prove_trivial_pbs_demo() -> Result<(), Box<dyn Error>> {
+    let params = Params::toy();
+    let input_message = 1;
+    let output_message = 3;
+    let input = LweCiphertext {
+        mask: vec![Goldilocks::ZERO; params.lwe_dimension],
+        body: encode_message(&params, input_message),
+    };
+    let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+    let instance = TrivialPbsInstance::new(params.clone(), input, test_polynomial);
+
+    let proof = prove_trivial_pbs(&instance)?;
+    verify_trivial_pbs_proof(&instance, &proof)?;
+
+    println!(
+        "trivial-pbs proof verified: lwe_dimension={}, glwe_dimension={}, degree={}, initial_exponent={}, public_inputs={}",
+        proof.params.lwe_dimension,
+        proof.params.glwe_dimension,
+        proof.params.polynomial_size,
+        proof.initial_exponent,
+        proof.public_inputs.len()
+    );
+    println!(
+        "input_message={}, output_message={}",
+        input_message,
+        decode_message(&params, instance.output.body)
+    );
+
+    Ok(())
+}
+
 fn polynomial(coeffs: &[u64]) -> Polynomial {
     Polynomial::from_coeffs(coeffs.iter().copied().map(Goldilocks::from_u64).collect())
 }
@@ -120,5 +157,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 }
 
 fn print_help() {
-    println!("Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract]");
+    println!(
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-trivial-pbs]"
+    );
 }

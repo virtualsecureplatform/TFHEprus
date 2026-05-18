@@ -13,3 +13,7 @@ p3-circuit.workspace = true
 p3-circuit-prover.workspace = true
 p3-field.workspace = true
 p3-goldilocks.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true

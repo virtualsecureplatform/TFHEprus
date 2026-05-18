@@ -11,9 +11,11 @@ use p3_circuit_prover::{
 };
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use tfheprus_circuits::{
-    build_mul_xai_circuit, build_poly_mul_circuit, build_sample_extract_circuit, MulXaiInstance,
-    PolyMulInstance, SampleExtractInstance,
+    build_mul_xai_circuit, build_poly_mul_circuit, build_sample_extract_circuit,
+    build_trivial_pbs_circuit, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    TrivialPbsInstance,
 };
+use tfheprus_core::Params;
 
 pub struct PolyMulProof {
     pub degree: usize,
@@ -31,6 +33,13 @@ pub struct MulXaiProof {
 pub struct SampleExtractProof {
     pub glwe_dimension: usize,
     pub degree: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
+pub struct TrivialPbsProof {
+    pub params: Params,
+    pub initial_exponent: usize,
     pub public_inputs: Vec<P3Goldilocks>,
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
@@ -55,6 +64,7 @@ impl std::error::Error for ProofError {}
 pub type PolyMulProofError = ProofError;
 pub type MulXaiProofError = ProofError;
 pub type SampleExtractProofError = ProofError;
+pub type TrivialPbsProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -153,6 +163,43 @@ pub fn prove_and_verify_sample_extract(instance: &SampleExtractInstance) -> Resu
     verify_sample_extract_proof(instance, &proof)
 }
 
+pub fn prove_trivial_pbs(instance: &TrivialPbsInstance) -> Result<TrivialPbsProof, ProofError> {
+    let circuit = build_trivial_pbs_circuit(
+        &instance.params,
+        instance.initial_exponent,
+        instance.input.body,
+    )
+    .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.public_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs)?;
+
+    Ok(TrivialPbsProof {
+        params: instance.params.clone(),
+        initial_exponent: instance.initial_exponent,
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn verify_trivial_pbs_proof(
+    instance: &TrivialPbsInstance,
+    proof: &TrivialPbsProof,
+) -> Result<(), ProofError> {
+    if proof.params != instance.params
+        || proof.initial_exponent != instance.initial_exponent
+        || proof.public_inputs != instance.public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof)
+}
+
+pub fn prove_and_verify_trivial_pbs(instance: &TrivialPbsInstance) -> Result<(), ProofError> {
+    let proof = prove_trivial_pbs(instance)?;
+    verify_trivial_pbs_proof(instance, &proof)
+}
+
 fn prove_circuit(
     circuit: &Circuit<P3Goldilocks>,
     public_inputs: &[P3Goldilocks],
@@ -197,7 +244,12 @@ fn verify_circuit_proof(proof: &BatchStarkProof<GoldilocksConfig>) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use tfheprus_core::{GlweCiphertext, Polynomial};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use tfheprus_core::{
+        bootstrap_without_keyswitch, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext,
+        Polynomial, SecretKey, TestPolynomial,
+    };
 
     use super::*;
 
@@ -283,5 +335,46 @@ mod tests {
             body: Polynomial::from_coeffs(body.into_iter().map(Into::into).collect()),
         };
         SampleExtractInstance::new(glwe)
+    }
+
+    #[test]
+    fn proves_and_verifies_trivial_mask_pbs_against_native_bootstrap() {
+        let params = Params::toy();
+        let mut rng = ChaCha20Rng::seed_from_u64(101);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let input = LweCiphertext::encrypt_trivial(&params, &sk.input_lwe, input_message);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let native_output = bootstrap_without_keyswitch(&params, &ek, &input, &test_polynomial);
+        let instance = TrivialPbsInstance::new(params, input, test_polynomial);
+
+        assert_eq!(instance.output, native_output);
+        prove_and_verify_trivial_pbs(&instance).unwrap();
+    }
+
+    #[test]
+    fn rejects_trivial_pbs_statement_mismatch_before_plonky3_verification() {
+        let params = Params::toy();
+        let input = LweCiphertext {
+            mask: vec![Goldilocks::ZERO; params.lwe_dimension],
+            body: tfheprus_core::encode_message(&params, 1),
+        };
+        let test_polynomial = TestPolynomial::single_slot(&params, 1, 3);
+        let instance = TrivialPbsInstance::new(params.clone(), input, test_polynomial);
+        let proof = prove_trivial_pbs(&instance).unwrap();
+
+        let other_input = LweCiphertext {
+            mask: vec![Goldilocks::ZERO; params.lwe_dimension],
+            body: tfheprus_core::encode_message(&params, 2),
+        };
+        let other_test_polynomial = TestPolynomial::single_slot(&params, 2, 3);
+        let other_instance = TrivialPbsInstance::new(params, other_input, other_test_polynomial);
+
+        assert_eq!(
+            verify_trivial_pbs_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
     }
 }
