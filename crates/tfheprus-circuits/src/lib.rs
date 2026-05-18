@@ -4,7 +4,9 @@ use p3_circuit::circuit::Circuit;
 use p3_circuit::CircuitBuilder;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as P3Goldilocks;
-use tfheprus_core::{Goldilocks, Polynomial};
+use tfheprus_core::{
+    sample_extract_index_zero, GlweCiphertext, Goldilocks, LweCiphertext, Polynomial,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolyMulInstance {
@@ -60,6 +62,42 @@ impl MulXaiInstance {
         let mut inputs = Vec::with_capacity(self.input.len() * 2);
         inputs.extend(self.input.coeffs().iter().copied().map(core_to_p3));
         inputs.extend(self.output.coeffs().iter().copied().map(core_to_p3));
+        inputs
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleExtractInstance {
+    pub glwe: GlweCiphertext,
+    pub lwe: LweCiphertext,
+}
+
+impl SampleExtractInstance {
+    pub fn new(glwe: GlweCiphertext) -> Self {
+        let lwe = sample_extract_index_zero(&glwe);
+        Self { glwe, lwe }
+    }
+
+    pub fn degree(&self) -> usize {
+        self.glwe.body.len()
+    }
+
+    pub fn glwe_dimension(&self) -> usize {
+        self.glwe.mask.len()
+    }
+
+    pub fn public_inputs(&self) -> Vec<P3Goldilocks> {
+        let degree = self.degree();
+        assert_eq!(self.lwe.mask.len(), self.glwe_dimension() * degree);
+
+        let mut inputs = Vec::with_capacity(self.glwe_dimension() * degree * 2 + degree + 1);
+        for poly in &self.glwe.mask {
+            assert_eq!(poly.len(), degree);
+            inputs.extend(poly.coeffs().iter().copied().map(core_to_p3));
+        }
+        inputs.extend(self.glwe.body.coeffs().iter().copied().map(core_to_p3));
+        inputs.extend(self.lwe.mask.iter().copied().map(core_to_p3));
+        inputs.push(core_to_p3(self.lwe.body));
         inputs
     }
 }
@@ -129,6 +167,37 @@ pub fn build_mul_xai_circuit(
     Ok(builder.build()?)
 }
 
+pub fn build_sample_extract_circuit(
+    glwe_dimension: usize,
+    degree: usize,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert!(glwe_dimension > 0);
+    assert!(degree > 0);
+    assert!(degree.is_power_of_two());
+
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut glwe_masks = Vec::with_capacity(glwe_dimension);
+    for _ in 0..glwe_dimension {
+        glwe_masks.push(builder.alloc_public_inputs(degree, "sample_extract_mask"));
+    }
+    let glwe_body = builder.alloc_public_inputs(degree, "sample_extract_body");
+    let lwe_mask = builder.alloc_public_inputs(glwe_dimension * degree, "sample_extract_lwe_mask");
+    let lwe_body = builder.alloc_public_inputs(1, "sample_extract_lwe_body");
+
+    let zero = builder.define_const(P3Goldilocks::ZERO);
+    for (row, poly) in glwe_masks.iter().enumerate() {
+        let offset = row * degree;
+        builder.connect(poly[0], lwe_mask[offset]);
+        for i in 1..degree {
+            let negated = builder.sub(zero, poly[degree - i]);
+            builder.connect(negated, lwe_mask[offset + i]);
+        }
+    }
+    builder.connect(glwe_body[0], lwe_body[0]);
+
+    Ok(builder.build()?)
+}
+
 pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
@@ -154,6 +223,25 @@ mod tests {
             Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]);
         let instance = MulXaiInstance::new(input, 5);
         let circuit = build_mul_xai_circuit(instance.degree(), instance.exponent).unwrap();
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner.run().unwrap();
+    }
+
+    #[test]
+    fn sample_extract_circuit_runs_against_native_instance() {
+        let glwe = GlweCiphertext {
+            mask: vec![Polynomial::from_coeffs(vec![
+                1u64.into(),
+                2u64.into(),
+                3u64.into(),
+                4u64.into(),
+            ])],
+            body: Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]),
+        };
+        let instance = SampleExtractInstance::new(glwe);
+        let circuit =
+            build_sample_extract_circuit(instance.glwe_dimension(), instance.degree()).unwrap();
         let mut runner = circuit.runner();
         runner.set_public_inputs(&instance.public_inputs()).unwrap();
         runner.run().unwrap();

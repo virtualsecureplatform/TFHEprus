@@ -11,7 +11,8 @@ use p3_circuit_prover::{
 };
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use tfheprus_circuits::{
-    build_mul_xai_circuit, build_poly_mul_circuit, MulXaiInstance, PolyMulInstance,
+    build_mul_xai_circuit, build_poly_mul_circuit, build_sample_extract_circuit, MulXaiInstance,
+    PolyMulInstance, SampleExtractInstance,
 };
 
 pub struct PolyMulProof {
@@ -23,6 +24,13 @@ pub struct PolyMulProof {
 pub struct MulXaiProof {
     pub degree: usize,
     pub exponent: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
+pub struct SampleExtractProof {
+    pub glwe_dimension: usize,
+    pub degree: usize,
     pub public_inputs: Vec<P3Goldilocks>,
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
@@ -46,6 +54,7 @@ impl std::error::Error for ProofError {}
 
 pub type PolyMulProofError = ProofError;
 pub type MulXaiProofError = ProofError;
+pub type SampleExtractProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -109,6 +118,41 @@ pub fn prove_and_verify_mul_xai(instance: &MulXaiInstance) -> Result<(), ProofEr
     verify_mul_xai_proof(instance, &proof)
 }
 
+pub fn prove_sample_extract(
+    instance: &SampleExtractInstance,
+) -> Result<SampleExtractProof, ProofError> {
+    let circuit = build_sample_extract_circuit(instance.glwe_dimension(), instance.degree())
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.public_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs)?;
+
+    Ok(SampleExtractProof {
+        glwe_dimension: instance.glwe_dimension(),
+        degree: instance.degree(),
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn verify_sample_extract_proof(
+    instance: &SampleExtractInstance,
+    proof: &SampleExtractProof,
+) -> Result<(), ProofError> {
+    if proof.glwe_dimension != instance.glwe_dimension()
+        || proof.degree != instance.degree()
+        || proof.public_inputs != instance.public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof)
+}
+
+pub fn prove_and_verify_sample_extract(instance: &SampleExtractInstance) -> Result<(), ProofError> {
+    let proof = prove_sample_extract(instance)?;
+    verify_sample_extract_proof(instance, &proof)
+}
+
 fn prove_circuit(
     circuit: &Circuit<P3Goldilocks>,
     public_inputs: &[P3Goldilocks],
@@ -153,7 +197,7 @@ fn verify_circuit_proof(proof: &BatchStarkProof<GoldilocksConfig>) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    use tfheprus_core::Polynomial;
+    use tfheprus_core::{GlweCiphertext, Polynomial};
 
     use super::*;
 
@@ -209,5 +253,35 @@ mod tests {
             verify_mul_xai_proof(&other_instance, &proof),
             Err(ProofError::StatementMismatch)
         );
+    }
+
+    #[test]
+    fn proves_and_verifies_sample_extract() {
+        let instance = sample_extract_instance([1, 2, 3, 4], [5, 6, 7, 8]);
+
+        prove_and_verify_sample_extract(&instance).unwrap();
+    }
+
+    #[test]
+    fn rejects_sample_extract_statement_mismatch_before_plonky3_verification() {
+        let instance = sample_extract_instance([1, 2, 3, 4], [5, 6, 7, 8]);
+        let proof = prove_sample_extract(&instance).unwrap();
+
+        let other_instance = sample_extract_instance([2, 2, 3, 4], [5, 6, 7, 8]);
+
+        assert_eq!(
+            verify_sample_extract_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
+    fn sample_extract_instance(mask: [u64; 4], body: [u64; 4]) -> SampleExtractInstance {
+        let glwe = GlweCiphertext {
+            mask: vec![Polynomial::from_coeffs(
+                mask.into_iter().map(Into::into).collect(),
+            )],
+            body: Polynomial::from_coeffs(body.into_iter().map(Into::into).collect()),
+        };
+        SampleExtractInstance::new(glwe)
     }
 }

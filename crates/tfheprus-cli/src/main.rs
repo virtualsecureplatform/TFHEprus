@@ -1,15 +1,19 @@
 use std::env;
 use std::error::Error;
 
-use tfheprus_circuits::{MulXaiInstance, PolyMulInstance};
-use tfheprus_core::{Goldilocks, Params, Polynomial};
-use tfheprus_prover::{prove_mul_xai, prove_poly_mul, verify_mul_xai_proof, verify_poly_mul_proof};
+use tfheprus_circuits::{MulXaiInstance, PolyMulInstance, SampleExtractInstance};
+use tfheprus_core::{GlweCiphertext, Goldilocks, Params, Polynomial};
+use tfheprus_prover::{
+    prove_mul_xai, prove_poly_mul, prove_sample_extract, verify_mul_xai_proof,
+    verify_poly_mul_proof, verify_sample_extract_proof,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     match env::args().nth(1).as_deref() {
         None | Some("params") => print_params(),
         Some("prove-poly-mul") => prove_poly_mul_demo()?,
         Some("prove-mul-xai") => prove_mul_xai_demo()?,
+        Some("prove-sample-extract") => prove_sample_extract_demo()?,
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -70,6 +74,28 @@ fn prove_mul_xai_demo() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn prove_sample_extract_demo() -> Result<(), Box<dyn Error>> {
+    let glwe = GlweCiphertext {
+        mask: vec![polynomial(&[1, 2, 3, 4])],
+        body: polynomial(&[5, 6, 7, 8]),
+    };
+    let instance = SampleExtractInstance::new(glwe);
+
+    let proof = prove_sample_extract(&instance)?;
+    verify_sample_extract_proof(&instance, &proof)?;
+
+    println!(
+        "sample-extract proof verified: glwe_dimension={}, degree={}, public_inputs={}",
+        proof.glwe_dimension,
+        proof.degree,
+        proof.public_inputs.len()
+    );
+    println!("lwe_mask={}", format_coefficients(&instance.lwe.mask));
+    println!("lwe_body={}", instance.lwe.body.value());
+
+    Ok(())
+}
+
 fn polynomial(coeffs: &[u64]) -> Polynomial {
     Polynomial::from_coeffs(coeffs.iter().copied().map(Goldilocks::from_u64).collect())
 }
@@ -84,6 +110,15 @@ fn format_polynomial(poly: &Polynomial) -> String {
     format!("[{coeffs}]")
 }
 
+fn format_coefficients(coeffs: &[Goldilocks]) -> String {
+    let coeffs = coeffs
+        .iter()
+        .map(|coeff| coeff.value().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{coeffs}]")
+}
+
 fn print_help() {
-    println!("Usage: tfheprus [params|prove-poly-mul|prove-mul-xai]");
+    println!("Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract]");
 }
