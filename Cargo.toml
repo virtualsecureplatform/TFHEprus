@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/tfheprus-core",
+    "crates/tfheprus-circuits",
+    "crates/tfheprus-prover",
+    "crates/tfheprus-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/virtualsecureplatform/TFHEprus"
+
+[workspace.dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
+thiserror = "1"
