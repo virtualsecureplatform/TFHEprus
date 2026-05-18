@@ -1,6 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rand::SeedableRng;
@@ -77,6 +78,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             parse_chunk_index_arg(&args)?,
             parse_required_arg(&args, 5, "leaf artifact output path")?,
         )?,
+        Some("prove-pbs-chain-leaves-recursive") => {
+            prove_pbs_chain_leaves_recursive_artifacts_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+                parse_required_chunk_count_arg(&args)?,
+                parse_required_arg(&args, 5, "leaf artifact output directory")?,
+            )?
+        }
         Some("aggregate-pbs-chain-leaves-recursive") => {
             aggregate_pbs_chain_leaf_artifacts_recursive_demo(
                 parse_required_arg(&args, 2, "root artifact output path")?,
@@ -829,6 +838,157 @@ fn prove_pbs_chain_leaf_recursive_artifact_demo(
     Ok(())
 }
 
+fn prove_pbs_chain_leaves_recursive_artifacts_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    chunk_count: usize,
+    output_dir: &str,
+) -> Result<(), Box<dyn Error>> {
+    if chunk_count < 2 {
+        return Err("chunk count must be at least 2".into());
+    }
+    let params = preset.params();
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?;
+    if total_steps == 0 || total_steps > params.lwe_dimension {
+        return Err(format!(
+            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    fs::create_dir_all(output_dir)?;
+    let output_dir = Path::new(output_dir);
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let mut accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let mut bsk_digest = pbs_bsk_digest_initial();
+    let mut mask_digest = pbs_mask_digest_initial();
+    let mut total_prove_time = Duration::ZERO;
+    let mut total_verify_time = Duration::ZERO;
+    let mut written_count = 0usize;
+    let mut reused_count = 0usize;
+    let mut max_base_private_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+    let mut total_artifact_bytes = 0usize;
+
+    for chunk_index in 0..chunk_count {
+        let chunk_start = chunk_index * chunk_step_count;
+        let chunk_end = chunk_start + chunk_step_count;
+        let instance = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[chunk_start..chunk_end].to_vec(),
+            accumulator.clone(),
+            evaluation_key.bootstrapping_key[chunk_start..chunk_end].to_vec(),
+            bsk_digest,
+            mask_digest,
+        );
+        let base_private_inputs = instance.private_inputs().len();
+        let statement = ActualPbsChainChunkStatement::from_instance(&instance);
+        let artifact_path = output_dir.join(format!("leaf-{chunk_index:05}.bin"));
+
+        let (proof, artifact_len, action, prove_time, verify_time) = if artifact_path.exists() {
+            let bytes = fs::read(&artifact_path)?;
+            let proof = deserialize_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+            let verify_started = Instant::now();
+            verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof).map_err(
+                |error| {
+                    format!(
+                        "existing leaf artifact {} failed verification: {error}",
+                        artifact_path.display()
+                    )
+                },
+            )?;
+            (
+                proof,
+                bytes.len(),
+                "reused",
+                Duration::ZERO,
+                verify_started.elapsed(),
+            )
+        } else {
+            let prove_started = Instant::now();
+            let proof = prove_recursive_actual_pbs_chain_chunk(&instance)?;
+            let prove_time = prove_started.elapsed();
+            let verify_started = Instant::now();
+            verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof)?;
+            let verify_time = verify_started.elapsed();
+            let artifact = serialize_recursive_actual_pbs_chain_chunk_proof(&proof)?;
+            fs::write(&artifact_path, &artifact)?;
+            (proof, artifact.len(), "written", prove_time, verify_time)
+        };
+
+        if action == "written" {
+            written_count += 1;
+        } else {
+            reused_count += 1;
+        }
+        total_prove_time += prove_time;
+        total_verify_time += verify_time;
+        total_artifact_bytes += artifact_len;
+        max_base_private_inputs = max_base_private_inputs.max(base_private_inputs);
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(proof.recursion.public_input_count());
+        accumulator = instance.output_accumulator;
+        bsk_digest = instance.bsk_digest_out;
+        mask_digest = instance.mask_digest_out;
+
+        println!(
+            "pbs-chain recursive leaf artifact {action}: preset={}, chunk={}, steps={}..{}, artifact={}, artifact_bytes={}, prove_us={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}",
+            preset.name(),
+            chunk_index,
+            chunk_start,
+            chunk_end,
+            artifact_path.display(),
+            artifact_len,
+            prove_time.as_micros(),
+            verify_time.as_micros(),
+            base_private_inputs,
+            proof.recursion.public_input_count()
+        );
+    }
+
+    if total_steps == params.lwe_dimension {
+        let evaluation_key_ntt = evaluation_key.to_ntt();
+        let native_output =
+            bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+        let chunked_output = sample_extract_index_zero(&accumulator);
+        assert_eq!(chunked_output, native_output);
+        println!(
+            "full_leaf_checkpoint_output_message={}",
+            chunked_output.decrypt(&params, &sk.extracted_output_lwe_key())
+        );
+    }
+
+    println!(
+        "pbs-chain recursive leaf artifacts ready: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, output_dir={}, written={}, reused={}, total_artifact_bytes={}, total_prove_ms={}, total_prove_us={}, total_verify_ms={}, total_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        preset.name(),
+        chunk_step_count,
+        chunk_count,
+        total_steps,
+        output_dir.display(),
+        written_count,
+        reused_count,
+        total_artifact_bytes,
+        total_prove_time.as_millis(),
+        total_prove_time.as_micros(),
+        total_verify_time.as_millis(),
+        total_verify_time.as_micros(),
+        max_base_private_inputs,
+        max_recursive_public_inputs,
+        format_coefficients(&bsk_digest),
+        format_coefficients(&mask_digest)
+    );
+
+    Ok(())
+}
+
 fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
     output_path: &str,
     leaf_paths: Vec<String>,
@@ -1316,7 +1476,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|verify-pbs-chain-root-artifact-recursive <root_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|verify-pbs-chain-root-artifact-recursive <root_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -1403,6 +1563,19 @@ fn parse_optional_chunk_count_arg(args: &[String]) -> Result<Option<usize>, Box<
                 return Err("chunk count must be nonzero".into());
             }
             Ok(Some(parsed))
+        }
+    }
+}
+
+fn parse_required_chunk_count_arg(args: &[String]) -> Result<usize, Box<dyn Error>> {
+    match args.get(4) {
+        None => Err("chunk count is required".into()),
+        Some(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("chunk count must be nonzero".into());
+            }
+            Ok(parsed)
         }
     }
 }

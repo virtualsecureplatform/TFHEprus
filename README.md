@@ -107,6 +107,7 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive 
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive toy 2 4
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive paper-v1 1 3
 mkdir -p target/pbs-checkpoints
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaves-recursive toy 2 2 target/pbs-checkpoints
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 0 target/pbs-checkpoints/toy-leaf-0.bin
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 1 target/pbs-checkpoints/toy-leaf-1.bin
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaves-recursive target/pbs-checkpoints/toy-root.bin target/pbs-checkpoints/toy-leaf-0.bin target/pbs-checkpoints/toy-leaf-1.bin
@@ -247,15 +248,20 @@ The CLI also serializes the root-only package, decodes it, and verifies the
 decoded aggregate root proof against the public chain summary without
 re-verifying all children from the high-level wrapper.
 
-The checkpoint path works on serialized recursive leaf artifacts. On the current
-runner, `prove-pbs-chain-leaf-recursive toy 2 0` wrote a
-`artifact_bytes=1511770` leaf for steps `0..2`, and chunk index `1` wrote
-`artifact_bytes=1514224` for steps `2..4`. Aggregating those two leaf files with
+The checkpoint path works on serialized recursive leaf artifacts. The
+single-leaf command can prove an arbitrary chunk by index, while
+`prove-pbs-chain-leaves-recursive` carries the accumulator and digest state
+forward sequentially and reuses existing verified leaf files in the output
+directory. On the current runner, a fresh `toy 2 2` leaf-directory run wrote two
+artifacts for steps `0..2` and `2..4` with `total_artifact_bytes=3025994`,
+`total_prove_us=12251458`, and `total_verify_us=267785`; the immediate rerun
+reused both artifacts with `written=0`, `reused=2`, `total_prove_us=0`, and
+`total_verify_us=338750`. Aggregating those two leaf files with
 `aggregate-pbs-chain-leaves-recursive` produced a one-layer root with
 `root_public_inputs=871`, `chain_summary_fields=55`,
-`aggregate_us=11904232`, `verify_us=466210`, `root_verify_us=15007`, and
+`aggregate_us=11982676`, `verify_us=478890`, `root_verify_us=14925`, and
 `root_artifact_bytes=906094`. `verify-pbs-chain-root-artifact-recursive`
-verified the resulting root artifact from disk with `verify_us=17713`. The
+verified the resulting root artifact from disk with `verify_us=15470`. The
 deserializer rehydrates lookup metadata that Plonky3 native verification can
 rebuild internally but recursive verifier circuit construction needs explicitly.
 
@@ -269,11 +275,12 @@ tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `total_leaf_private_inputs=20920536`.
 
 Remaining gap to paper-param PBS: execute the full 728-step paper-v1 run using
-the checkpoint artifact flow, improve the scheduler so later leaf checkpoints do
-not need to recompute long native prefixes, replace the current PoC digest with
-the final paper-style hash/commitment chain, harden recursive MMCS verification
-for capped Merkle commitments, and add the final TFHE key-switch if the target
-statement needs ciphertexts under the original output LWE key.
+the checkpoint artifact flow, add a convenience aggregator for checkpoint
+directories so full runs do not need shell-expanded leaf lists, replace the
+current PoC digest with the final paper-style hash/commitment chain, harden
+recursive MMCS verification for capped Merkle commitments, and add the final
+TFHE key-switch if the target statement needs ciphertexts under the original
+output LWE key.
 
 ## Validation
 
