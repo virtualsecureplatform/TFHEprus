@@ -39,7 +39,8 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 circuit for public GLWE index-zero sample extraction to LWE.
 - Plonky3 PBS PoC for the native nonzero-mask `bootstrap_without_keyswitch`
   path. This includes `mul_xai`, CMUX, GGSW external product, exact gadget
-  decomposition with a table-backed digit range check, and sample extraction.
+  decomposition, paper-style approximate gadget decomposition with bounded
+  reconstruction error, table-backed range checks, and sample extraction.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -56,6 +57,8 @@ cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
+cargo run -p tfheprus-cli -- profile-actual-pbs paper-v1
+cargo run -p tfheprus-cli -- run-actual-pbs-native paper-v1
 cargo run -p tfheprus-cli -- prove-actual-pbs
 ```
 
@@ -65,10 +68,10 @@ skipped CMUX/external-product work.
 
 On the current runner, `cargo run --release -p tfheprus-cli --
 run-actual-pbs-native` completed the coefficient-key PBS in
-`native_coeff_us=750`, converted the bootstrapping key to NTT form in
-`key_ntt_precompute_us=194`, and completed the online NTT-key PBS in
-`native_ntt_us=467`. `cargo run --release -p tfheprus-cli --
-prove-actual-pbs` completed with `prove_us=434979` and `verify_us=10074`.
+`native_coeff_us=826`, converted the bootstrapping key to NTT form in
+`key_ntt_precompute_us=209`, and completed the online NTT-key PBS in
+`native_ntt_us=515`. `cargo run --release -p tfheprus-cli --
+prove-actual-pbs` completed with `prove_us=504195` and `verify_us=11456`.
 These are still `Params::toy()` timings; at degree 8, NTT overhead dominates
 the native run, while the proof circuit already benefits from removing the
 key-side transform.
@@ -82,6 +85,19 @@ toy preset rather than a secure TFHE parameter set. On the current runner,
 and `native_ntt_us=4747`. The moderate proof command is intentionally not
 enabled by default; this preset is for measuring native and statement-size
 growth before attempting a much larger proof.
+
+`Params::paper_v1()` exposes the paper-shaped PBS preset
+`n=728, N=1024, k=1, B=2^5, l=4, p=4`. `profile-actual-pbs paper-v1` is a
+lightweight estimator, so it does not allocate the full key just to count
+wires. On the current runner it reports `bsk_public_inputs=11927552`,
+`public_inputs=11930330`, `private_inputs=8992320`, and
+`private_inputs_per_coeff=6` for approximate decomposition digits plus
+error/sign witnesses. `run-actual-pbs-native paper-v1` skips the coefficient
+reference run and completed the NTT-key native PBS with
+`eval_keygen_us=942965`, `key_ntt_precompute_us=471961`, and
+`native_ntt_us=842314`, decrypting the output message as expected. The
+paper-v1 proof command remains disabled until the monolithic PBS circuit is
+split into recursive/chunked proofs.
 
 ## Validation
 

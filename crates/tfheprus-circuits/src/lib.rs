@@ -233,6 +233,61 @@ impl ActualPbsInstance {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActualPbsCircuitProfile {
+    pub cmux_count: usize,
+    pub nonzero_rotation_count: usize,
+    pub bootstrapping_key_public_inputs: usize,
+    pub public_inputs: usize,
+    pub private_inputs: usize,
+    pub torus_private_inputs: usize,
+    pub decomposition_coefficients: usize,
+    pub decomposition_private_inputs_per_coeff: usize,
+    pub approximate_decomposition: bool,
+}
+
+impl ActualPbsCircuitProfile {
+    pub fn estimate(params: &Params, nonzero_rotation_count: usize) -> Self {
+        let glwe_polynomial_count = params.glwe_dimension + 1;
+        let bootstrapping_key_public_inputs = params.lwe_dimension
+            * glwe_polynomial_count
+            * params.decomposition_level_count
+            * glwe_polynomial_count
+            * params.polynomial_size;
+        let public_inputs = params.lwe_dimension
+            + 1
+            + params.polynomial_size
+            + bootstrapping_key_public_inputs
+            + params.glwe_dimension * params.polynomial_size
+            + 1;
+
+        let approximate_decomposition = !uses_exact_binary_decomposition(params);
+        let decomposition_private_inputs_per_coeff =
+            params.decomposition_level_count + if approximate_decomposition { 2 } else { 0 };
+        let decomposition_coefficients =
+            params.lwe_dimension * glwe_polynomial_count * params.polynomial_size;
+        let torus_private_inputs = 64 * (params.lwe_dimension + 1);
+        let private_inputs = torus_private_inputs
+            + decomposition_coefficients * decomposition_private_inputs_per_coeff;
+
+        Self {
+            cmux_count: params.lwe_dimension,
+            nonzero_rotation_count,
+            bootstrapping_key_public_inputs,
+            public_inputs,
+            private_inputs,
+            torus_private_inputs,
+            decomposition_coefficients,
+            decomposition_private_inputs_per_coeff,
+            approximate_decomposition,
+        }
+    }
+
+    pub fn from_instance(instance: &ActualPbsInstance) -> Self {
+        Self::estimate(&instance.params, instance.nonzero_rotation_count())
+    }
+}
+
 pub fn build_poly_mul_circuit(
     degree: usize,
 ) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
@@ -1092,6 +1147,9 @@ mod tests {
             bootstrapping_key: vec![zero_ggsw(&params)],
         };
         let instance = ActualPbsInstance::new(params, input, test_polynomial, evaluation_key);
+        let profile = ActualPbsCircuitProfile::from_instance(&instance);
+        assert_eq!(profile.public_inputs, instance.public_inputs().len());
+        assert_eq!(profile.private_inputs, instance.private_inputs().len());
         let circuit = build_actual_pbs_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
         runner.set_public_inputs(&instance.public_inputs()).unwrap();

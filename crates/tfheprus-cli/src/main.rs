@@ -5,7 +5,8 @@ use std::time::Instant;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
-    ActualPbsInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    ActualPbsCircuitProfile, ActualPbsInstance, MulXaiInstance, PolyMulInstance,
+    SampleExtractInstance,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, EvaluationKey, GlweCiphertext,
@@ -144,18 +145,26 @@ fn prove_actual_pbs_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> {
 }
 
 fn profile_actual_pbs_demo(preset: ParamPreset) {
-    let (params, _sk, evaluation_key, input, test_polynomial) =
-        actual_pbs_materials(preset.params());
-    let instance = ActualPbsInstance::new(params.clone(), input, test_polynomial, evaluation_key);
-    let public_inputs = instance.public_inputs().len();
-    let private_inputs = instance.private_inputs().len();
+    let params = preset.params();
+    let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
 
     print_param_line(preset.name(), &params);
     println!(
-        "actual-pbs profile: nonzero_rotations={}, public_inputs={}, private_inputs={}",
-        instance.nonzero_rotation_count(),
-        public_inputs,
-        private_inputs
+        "actual-pbs profile: cmux_count={}, nonzero_rotations={}, bsk_public_inputs={}, public_inputs={}, public_input_mib={:.2}, private_inputs={}, private_input_mib={:.2}",
+        profile.cmux_count,
+        profile.nonzero_rotation_count,
+        profile.bootstrapping_key_public_inputs,
+        profile.public_inputs,
+        field_elements_to_mib(profile.public_inputs),
+        profile.private_inputs,
+        field_elements_to_mib(profile.private_inputs),
+    );
+    println!(
+        "decomposition: approximate={}, coeffs={}, private_inputs_per_coeff={}, torus_private_inputs={}",
+        profile.approximate_decomposition,
+        profile.decomposition_coefficients,
+        profile.decomposition_private_inputs_per_coeff,
+        profile.torus_private_inputs
     );
 }
 
@@ -173,10 +182,14 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
 
     let (input, test_polynomial) = actual_pbs_input(&params, &sk);
 
-    let coeff_started = Instant::now();
-    let coeff_output =
-        bootstrap_without_keyswitch(&params, &evaluation_key, &input, &test_polynomial);
-    let coeff_time = coeff_started.elapsed();
+    let coeff_result = if preset.runs_coeff_reference() {
+        let started = Instant::now();
+        let output =
+            bootstrap_without_keyswitch(&params, &evaluation_key, &input, &test_polynomial);
+        Some((output, started.elapsed()))
+    } else {
+        None
+    };
 
     let key_started = Instant::now();
     let evaluation_key_ntt = evaluation_key.to_ntt();
@@ -186,7 +199,9 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
     let output =
         bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
     let ntt_time = ntt_started.elapsed();
-    assert_eq!(output, coeff_output);
+    if let Some((coeff_output, _)) = &coeff_result {
+        assert_eq!(&output, coeff_output);
+    }
 
     println!(
         "actual-pbs native run: preset={}, lwe_dimension={}, glwe_dimension={}, degree={}",
@@ -201,8 +216,8 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
         sk_time.as_micros(),
         ek_time.as_millis(),
         ek_time.as_micros(),
-        coeff_time.as_millis(),
-        coeff_time.as_micros(),
+        optional_millis(coeff_result.as_ref().map(|(_, time)| *time)),
+        optional_micros(coeff_result.as_ref().map(|(_, time)| *time)),
         key_ntt_time.as_millis(),
         key_ntt_time.as_micros(),
         ntt_time.as_millis(),
@@ -277,7 +292,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-actual-pbs|profile-actual-pbs [toy|moderate]|run-actual-pbs-native [toy|moderate]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -285,6 +300,7 @@ fn print_help() {
 enum ParamPreset {
     Toy,
     Moderate,
+    PaperV1,
 }
 
 impl ParamPreset {
@@ -292,6 +308,7 @@ impl ParamPreset {
         match self {
             Self::Toy => "toy",
             Self::Moderate => "moderate",
+            Self::PaperV1 => "paper-v1",
         }
     }
 
@@ -299,7 +316,12 @@ impl ParamPreset {
         match self {
             Self::Toy => Params::toy(),
             Self::Moderate => Params::moderate_toy(),
+            Self::PaperV1 => Params::paper_v1(),
         }
+    }
+
+    fn runs_coeff_reference(self) -> bool {
+        !matches!(self, Self::PaperV1)
     }
 }
 
@@ -307,18 +329,37 @@ fn parse_preset_arg(args: &[String]) -> Result<ParamPreset, Box<dyn Error>> {
     match args.get(2).map(String::as_str) {
         None | Some("toy") => Ok(ParamPreset::Toy),
         Some("moderate" | "moderate-toy" | "mid") => Ok(ParamPreset::Moderate),
+        Some("paper" | "paper-v1") => Ok(ParamPreset::PaperV1),
         Some(other) => Err(format!("unknown parameter preset: {other}").into()),
     }
 }
 
 fn parse_prove_preset_arg(args: &[String]) -> Result<ParamPreset, Box<dyn Error>> {
     let preset = parse_preset_arg(args)?;
-    if matches!(preset, ParamPreset::Moderate) {
+    if !matches!(preset, ParamPreset::Toy) {
         return Err(
-            "prove-actual-pbs moderate is intentionally disabled; use profile-actual-pbs moderate and run-actual-pbs-native moderate first".into(),
+            "prove-actual-pbs is currently enabled only for toy; use profile-actual-pbs and run-actual-pbs-native for larger presets until the recursive proof split is implemented".into(),
         );
     }
     Ok(preset)
+}
+
+fn field_elements_to_mib(field_elements: usize) -> f64 {
+    field_elements as f64 * 8.0 / (1024.0 * 1024.0)
+}
+
+fn optional_millis(duration: Option<std::time::Duration>) -> String {
+    duration.map_or_else(
+        || "skipped".to_string(),
+        |time| time.as_millis().to_string(),
+    )
+}
+
+fn optional_micros(duration: Option<std::time::Duration>) -> String {
+    duration.map_or_else(
+        || "skipped".to_string(),
+        |time| time.as_micros().to_string(),
+    )
 }
 
 fn print_param_line(name: &str, params: &Params) {
