@@ -123,6 +123,35 @@ pub struct AggregatedRecursiveActualPbsChainChunkPairProof {
     pub aggregation: recursive::AggregatedRecursiveBatchProof,
 }
 
+pub struct AggregatedRecursiveActualPbsChainChunkTreeProof {
+    pub leaves: Vec<RecursiveActualPbsChainChunkProof>,
+    pub layers: Vec<Vec<recursive::AggregatedRecursiveBatchProof>>,
+}
+
+impl AggregatedRecursiveActualPbsChainChunkTreeProof {
+    pub fn leaf_count(&self) -> usize {
+        self.leaves.len()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn root_public_input_count(&self) -> Option<usize> {
+        self.layers
+            .last()
+            .and_then(|layer| layer.first())
+            .map(|proof| proof.public_input_count())
+    }
+
+    pub fn root_table_count(&self) -> Option<usize> {
+        self.layers
+            .last()
+            .and_then(|layer| layer.first())
+            .map(|proof| proof.table_count())
+    }
+}
+
 impl ActualPbsChainChunkProof {
     pub fn public_statement(&self) -> ActualPbsChainChunkStatement {
         ActualPbsChainChunkStatement {
@@ -522,6 +551,132 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
         &proof.right.recursion,
         &proof.aggregation,
     )
+}
+
+pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_tree(
+    leaves: Vec<RecursiveActualPbsChainChunkProof>,
+) -> Result<AggregatedRecursiveActualPbsChainChunkTreeProof, ProofError> {
+    validate_aggregation_leaf_count(leaves.len())?;
+
+    let mut layers = Vec::new();
+    let mut current_nodes = (0..leaves.len())
+        .map(AggregationNodeRef::Leaf)
+        .collect::<Vec<_>>();
+    while current_nodes.len() > 1 {
+        let layer_index = layers.len();
+        let pair_count = current_nodes.len() / 2;
+        let mut next_layer = Vec::with_capacity(pair_count);
+        let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        for node_index in 0..pair_count {
+            let left =
+                aggregation_node_batch_proof(current_nodes[node_index * 2], &leaves, &layers);
+            let right =
+                aggregation_node_batch_proof(current_nodes[node_index * 2 + 1], &leaves, &layers);
+            next_layer.push(recursive::prove_aggregate_batch_proofs(left, right)?);
+            next_nodes.push(AggregationNodeRef::Aggregate {
+                layer_index,
+                node_index,
+            });
+        }
+        if let Some(&carried_node) = current_nodes
+            .last()
+            .filter(|_| current_nodes.len() % 2 == 1)
+        {
+            next_nodes.push(carried_node);
+        }
+        layers.push(next_layer);
+        current_nodes = next_nodes;
+    }
+
+    Ok(AggregatedRecursiveActualPbsChainChunkTreeProof { leaves, layers })
+}
+
+pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
+    statements: &[ActualPbsChainChunkStatement],
+    proof: &AggregatedRecursiveActualPbsChainChunkTreeProof,
+) -> Result<(), ProofError> {
+    validate_aggregation_leaf_count(proof.leaves.len())?;
+    if statements.len() != proof.leaves.len() {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    for (statement, leaf) in statements.iter().zip(proof.leaves.iter()) {
+        verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, leaf)?;
+    }
+
+    let mut current_nodes = (0..proof.leaves.len())
+        .map(AggregationNodeRef::Leaf)
+        .collect::<Vec<_>>();
+    for (layer_index, layer) in proof.layers.iter().enumerate() {
+        if current_nodes.len() <= 1 {
+            return Err(ProofError::StatementMismatch);
+        }
+        let pair_count = current_nodes.len() / 2;
+        if layer.len() != pair_count {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        for (node_index, aggregate) in layer.iter().enumerate() {
+            let left = aggregation_node_batch_proof(
+                current_nodes[node_index * 2],
+                &proof.leaves,
+                &proof.layers,
+            );
+            let right = aggregation_node_batch_proof(
+                current_nodes[node_index * 2 + 1],
+                &proof.leaves,
+                &proof.layers,
+            );
+            recursive::verify_aggregated_recursive_batch_for_child_proofs(left, right, aggregate)?;
+            next_nodes.push(AggregationNodeRef::Aggregate {
+                layer_index,
+                node_index,
+            });
+        }
+        if let Some(&carried_node) = current_nodes
+            .last()
+            .filter(|_| current_nodes.len() % 2 == 1)
+        {
+            next_nodes.push(carried_node);
+        }
+        current_nodes = next_nodes;
+    }
+
+    if current_nodes.len() != 1 {
+        return Err(ProofError::StatementMismatch);
+    }
+    Ok(())
+}
+
+fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> {
+    if leaf_count < 2 {
+        return Err(ProofError::StatementMismatch);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum AggregationNodeRef {
+    Leaf(usize),
+    Aggregate {
+        layer_index: usize,
+        node_index: usize,
+    },
+}
+
+fn aggregation_node_batch_proof<'a>(
+    node: AggregationNodeRef,
+    leaves: &'a [RecursiveActualPbsChainChunkProof],
+    layers: &'a [Vec<recursive::AggregatedRecursiveBatchProof>],
+) -> &'a BatchStarkProof<GoldilocksConfig> {
+    match node {
+        AggregationNodeRef::Leaf(index) => leaves[index].recursion.batch_proof(),
+        AggregationNodeRef::Aggregate {
+            layer_index,
+            node_index,
+        } => layers[layer_index][node_index].batch_proof(),
+    }
 }
 
 fn prove_circuit(

@@ -56,6 +56,10 @@ pub struct AggregatedRecursiveBatchProof {
 }
 
 impl RecursiveBatchProof {
+    pub(crate) fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
+        &self.proof
+    }
+
     pub fn table_count(&self) -> usize {
         self.proof.proof.opened_values.instances.len()
     }
@@ -66,6 +70,10 @@ impl RecursiveBatchProof {
 }
 
 impl AggregatedRecursiveBatchProof {
+    pub(crate) fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
+        &self.proof
+    }
+
     pub fn table_count(&self) -> usize {
         self.proof.proof.opened_values.instances.len()
     }
@@ -164,19 +172,23 @@ pub fn prove_aggregate_recursive_batches(
     left: &RecursiveBatchProof,
     right: &RecursiveBatchProof,
 ) -> Result<AggregatedRecursiveBatchProof, ProofError> {
+    prove_aggregate_batch_proofs(&left.proof, &right.proof)
+}
+
+pub(crate) fn prove_aggregate_batch_proofs(
+    left: &BatchStarkProof<GoldilocksConfig>,
+    right: &BatchStarkProof<GoldilocksConfig>,
+) -> Result<AggregatedRecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
     let table_packing = TablePacking::default();
     let (verification_circuit, left_inputs, right_inputs, left_mmcs_op_ids, right_mmcs_op_ids) =
-        build_aggregation_verifier_circuit(&left.proof, &right.proof, &config)?;
-    let (mut public_inputs, mut private_inputs) = left_inputs.pack_values(
-        &table_public_inputs(&left.proof),
-        &left.proof.proof,
-        &left.proof.stark_common,
-    );
+        build_aggregation_verifier_circuit(left, right, &config)?;
+    let (mut public_inputs, mut private_inputs) =
+        left_inputs.pack_values(&table_public_inputs(left), &left.proof, &left.stark_common);
     let (right_public_inputs, right_private_inputs) = right_inputs.pack_values(
-        &table_public_inputs(&right.proof),
-        &right.proof.proof,
-        &right.proof.stark_common,
+        &table_public_inputs(right),
+        &right.proof,
+        &right.stark_common,
     );
     public_inputs.extend(right_public_inputs);
     private_inputs.extend(right_private_inputs);
@@ -191,7 +203,7 @@ pub fn prove_aggregate_recursive_batches(
     set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
         &mut runner,
         &left_mmcs_op_ids,
-        &left.proof.proof.opening_proof,
+        &left.proof.opening_proof,
         Poseidon2Config::GOLDILOCKS_D2_W8,
     )
     .map_err(|error| {
@@ -200,7 +212,7 @@ pub fn prove_aggregate_recursive_batches(
     set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
         &mut runner,
         &right_mmcs_op_ids,
-        &right.proof.proof.opening_proof,
+        &right.proof.opening_proof,
         Poseidon2Config::GOLDILOCKS_D2_W8,
     )
     .map_err(|error| {
@@ -259,7 +271,15 @@ pub fn verify_aggregated_recursive_batch_for_children(
     right: &RecursiveBatchProof,
     proof: &AggregatedRecursiveBatchProof,
 ) -> Result<(), ProofError> {
-    let expected_inputs = aggregate_public_inputs_for_batches(&left.proof, &right.proof)?;
+    verify_aggregated_recursive_batch_for_child_proofs(&left.proof, &right.proof, proof)
+}
+
+pub(crate) fn verify_aggregated_recursive_batch_for_child_proofs(
+    left: &BatchStarkProof<GoldilocksConfig>,
+    right: &BatchStarkProof<GoldilocksConfig>,
+    proof: &AggregatedRecursiveBatchProof,
+) -> Result<(), ProofError> {
+    let expected_inputs = aggregate_public_inputs_for_batches(left, right)?;
     if proof.public_inputs != expected_inputs {
         return Err(ProofError::StatementMismatch);
     }

@@ -66,9 +66,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   values; it checks params, chunk length, public accumulator endpoints, and
   digest-chain endpoints. The verifier rebuilds the expected chunk circuit from
   params and chunk length and rejects proofs with mismatched circuit metadata.
-- Pair aggregation for recursive PBS chunks. Two consecutive recursive chunk
-  proofs can be verified inside a single outer proof, giving the first
-  aggregation step needed for a recursive proof tree over the full PBS.
+- Recursive aggregation for PBS chunks. Recursive chunk proofs can be reduced
+  through a carry-up aggregation tree, including non-power-of-two chunk counts
+  needed by practical paper-v1 schedules.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -94,6 +94,8 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-prefix-recursive toy 2
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-prefix-recursive paper-v1 2 4
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive toy 2
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive paper-v1 1
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive toy 2 4
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive paper-v1 1 3
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -203,13 +205,26 @@ paper shape: `paper-v1 1` covered steps `0..2` as two one-step chunks and
 aggregated them with `aggregate_public_inputs=16914`,
 `aggregate_prove_us=13627661`, and `verify_us=15987374`.
 
+The recursive aggregation tree now reduces more than two chunk proofs to one
+root and carries odd nodes upward, so it does not require a power-of-two leaf
+count. `cargo run --release -p tfheprus-cli --
+prove-pbs-chain-tree-aggregate-recursive toy 2 4` covered all 8 toy PBS steps
+as four two-step chunks, matched the native NTT PBS output with
+`full_tree_output_message=3`, and produced a two-layer tree with
+`layer_sizes=[2,1]`, `root_public_inputs=2522`,
+`aggregate_prove_us=35863716`, and `verify_us=1355705`. The odd-leaf path also
+works at paper shape: `paper-v1 1 3` covered three one-step chunks with
+`layer_sizes=[1,1]`, `root_public_inputs=42364`,
+`leaf_prove_us=105966580`, `aggregate_prove_us=27429504`, and
+`verify_us=24816007`.
+
 Remaining gap to paper-param PBS: run or schedule the full 728-step paper-v1
-prefix, build a full aggregation tree over all recursive chunk proofs instead
-of only a pair, package the final aggregate statement succinctly without
-shipping all child proofs in the high-level wrapper, replace the current PoC
-digest with the final paper-style hash/commitment chain, harden recursive MMCS
-verification for capped Merkle commitments, and add the final TFHE key-switch if
-the target statement needs ciphertexts under the original output LWE key.
+prefix under the aggregation tree, package the final aggregate statement
+succinctly without shipping all child proofs in the high-level wrapper, replace
+the current PoC digest with the final paper-style hash/commitment chain, harden
+recursive MMCS verification for capped Merkle commitments, and add the final
+TFHE key-switch if the target statement needs ciphertexts under the original
+output LWE key.
 
 ## Validation
 
