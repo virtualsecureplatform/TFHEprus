@@ -3,10 +3,16 @@ use core::ops::{Index, IndexMut};
 use rand::RngCore;
 
 use crate::field::Goldilocks;
+use crate::ntt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Polynomial {
     coeffs: Vec<Goldilocks>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NttPolynomial {
+    evals: Vec<Goldilocks>,
 }
 
 impl Polynomial {
@@ -83,6 +89,18 @@ impl Polynomial {
         Self::from_coeffs(out)
     }
 
+    pub fn mul(&self, rhs: &Self) -> Self {
+        self.mul_ntt(rhs)
+    }
+
+    pub fn mul_ntt(&self, rhs: &Self) -> Self {
+        Self::from_coeffs(ntt::negacyclic_mul(&self.coeffs, &rhs.coeffs))
+    }
+
+    pub fn to_ntt(&self) -> NttPolynomial {
+        NttPolynomial::from_polynomial(self)
+    }
+
     pub fn mul_xai(&self, exponent: usize) -> Self {
         let n = self.len();
         let modulus = 2 * n;
@@ -116,6 +134,33 @@ impl Polynomial {
                 .map(|(&a, &b)| f(a, b))
                 .collect(),
         )
+    }
+}
+
+impl NttPolynomial {
+    pub fn from_polynomial(poly: &Polynomial) -> Self {
+        Self {
+            evals: ntt::negacyclic_ntt(poly.coeffs()),
+        }
+    }
+
+    pub fn from_evals(evals: Vec<Goldilocks>) -> Self {
+        assert!(!evals.is_empty());
+        assert!(evals.len().is_power_of_two());
+        Self { evals }
+    }
+
+    pub fn evals(&self) -> &[Goldilocks] {
+        &self.evals
+    }
+
+    pub fn mul_polynomial(&self, rhs: &Polynomial) -> Polynomial {
+        let rhs_ntt = rhs.to_ntt();
+        self.mul_ntt(&rhs_ntt)
+    }
+
+    pub fn mul_ntt(&self, rhs: &Self) -> Polynomial {
+        Polynomial::from_coeffs(ntt::negacyclic_mul_ntt(&self.evals, &rhs.evals))
     }
 }
 
@@ -166,5 +211,22 @@ mod tests {
             x.mul_naive(&x).mul_naive(&x).mul_naive(&x),
             Polynomial::constant(4, -Goldilocks::ONE)
         );
+    }
+
+    #[test]
+    fn ntt_multiplication_matches_naive() {
+        for size in [4, 8, 16, 1024] {
+            let lhs = Polynomial::from_coeffs(
+                (0..size)
+                    .map(|value| Goldilocks::from_u64((value * 3 + 1) as u64))
+                    .collect(),
+            );
+            let rhs = Polynomial::from_coeffs(
+                (0..size)
+                    .map(|value| Goldilocks::from_u64((value * 5 + 7) as u64))
+                    .collect(),
+            );
+            assert_eq!(lhs.mul_ntt(&rhs), lhs.mul_naive(&rhs));
+        }
     }
 }

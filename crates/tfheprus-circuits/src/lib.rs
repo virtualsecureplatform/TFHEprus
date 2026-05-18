@@ -6,9 +6,10 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
-    bootstrap_without_keyswitch, decompose_polynomial, mod_switch_to_exponent,
-    sample_extract_index_zero, EvaluationKey, GgswCiphertext, GlevCiphertext, GlweCiphertext,
-    Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
+    bootstrap_without_keyswitch, decompose_polynomial, mod_switch_to_exponent, negacyclic_ntt,
+    primitive_power_of_two_root, sample_extract_index_zero, EvaluationKey, GgswCiphertext,
+    GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
+    GOLDILOCKS_TWO_ADICITY,
 };
 
 #[derive(Clone)]
@@ -18,13 +19,19 @@ struct GlweExpr {
 }
 
 #[derive(Clone)]
-struct GlevExpr {
-    levels: Vec<GlweExpr>,
+struct GlweNttExpr {
+    mask: Vec<Vec<ExprId>>,
+    body: Vec<ExprId>,
 }
 
 #[derive(Clone)]
-struct GgswExpr {
-    rows: Vec<GlevExpr>,
+struct GlevNttExpr {
+    levels: Vec<GlweNttExpr>,
+}
+
+#[derive(Clone)]
+struct GgswNttExpr {
+    rows: Vec<GlevNttExpr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +43,7 @@ pub struct PolyMulInstance {
 
 impl PolyMulInstance {
     pub fn new(lhs: Polynomial, rhs: Polynomial) -> Self {
-        let product = lhs.mul_naive(&rhs);
+        let product = lhs.mul(&rhs);
         Self { lhs, rhs, product }
     }
 
@@ -189,7 +196,7 @@ impl ActualPbsInstance {
         inputs.extend(self.input.mask.iter().copied().map(core_to_p3));
         inputs.push(core_to_p3(self.input.body));
         append_polynomial_public_inputs(&mut inputs, &self.test_polynomial.poly);
-        append_evaluation_key_public_inputs(&mut inputs, &self.evaluation_key);
+        append_evaluation_key_ntt_public_inputs(&mut inputs, &self.evaluation_key);
         inputs.extend(self.output.mask.iter().copied().map(core_to_p3));
         inputs.push(core_to_p3(self.output.body));
         inputs
@@ -236,20 +243,7 @@ pub fn build_poly_mul_circuit(
     let rhs = builder.alloc_public_inputs(degree, "poly_mul_rhs");
     let expected = builder.alloc_public_inputs(degree, "poly_mul_expected");
 
-    let zero = builder.define_const(P3Goldilocks::ZERO);
-    let mut computed = vec![zero; degree];
-
-    for (i, &lhs_cell) in lhs.iter().enumerate() {
-        for (j, &rhs_cell) in rhs.iter().enumerate() {
-            let product = builder.mul(lhs_cell, rhs_cell);
-            let target = i + j;
-            if target < degree {
-                computed[target] = builder.add(computed[target], product);
-            } else {
-                computed[target - degree] = builder.sub(computed[target - degree], product);
-            }
-        }
-    }
+    let computed = poly_mul_expr(&mut builder, &lhs, &rhs);
 
     for (actual, expected) in computed.into_iter().zip(expected) {
         builder.connect(actual, expected);
@@ -339,7 +333,7 @@ pub fn build_actual_pbs_circuit(
     let test_poly =
         builder.alloc_public_inputs(instance.params.polynomial_size, "actual_pbs_test_poly");
     let bootstrapping_key = (0..instance.params.lwe_dimension)
-        .map(|_| alloc_public_ggsw(&mut builder, &instance.params))
+        .map(|_| alloc_public_ggsw_ntt(&mut builder, &instance.params))
         .collect::<Vec<_>>();
     let output_mask = builder.alloc_public_inputs(
         instance.params.glwe_dimension * instance.params.polynomial_size,
@@ -382,28 +376,32 @@ fn append_polynomial_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polyno
     inputs.extend(poly.coeffs().iter().copied().map(core_to_p3));
 }
 
-fn append_glwe_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlweCiphertext) {
+fn append_polynomial_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
+    inputs.extend(negacyclic_ntt(poly.coeffs()).into_iter().map(core_to_p3));
+}
+
+fn append_glwe_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlweCiphertext) {
     for poly in &ct.mask {
-        append_polynomial_public_inputs(inputs, poly);
+        append_polynomial_ntt_public_inputs(inputs, poly);
     }
-    append_polynomial_public_inputs(inputs, &ct.body);
+    append_polynomial_ntt_public_inputs(inputs, &ct.body);
 }
 
-fn append_glev_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlevCiphertext) {
+fn append_glev_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlevCiphertext) {
     for level in &ct.levels {
-        append_glwe_public_inputs(inputs, level);
+        append_glwe_ntt_public_inputs(inputs, level);
     }
 }
 
-fn append_ggsw_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GgswCiphertext) {
+fn append_ggsw_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GgswCiphertext) {
     for row in &ct.rows {
-        append_glev_public_inputs(inputs, row);
+        append_glev_ntt_public_inputs(inputs, row);
     }
 }
 
-fn append_evaluation_key_public_inputs(inputs: &mut Vec<P3Goldilocks>, ek: &EvaluationKey) {
+fn append_evaluation_key_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ek: &EvaluationKey) {
     for ggsw in &ek.bootstrapping_key {
-        append_ggsw_public_inputs(inputs, ggsw);
+        append_ggsw_ntt_public_inputs(inputs, ggsw);
     }
 }
 
@@ -425,26 +423,35 @@ fn append_decomposition_private_inputs(
     }
 }
 
-fn alloc_public_ggsw(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GgswExpr {
+fn alloc_public_ggsw_ntt(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+) -> GgswNttExpr {
     let rows = (0..=params.glwe_dimension)
-        .map(|_| alloc_public_glev(builder, params))
+        .map(|_| alloc_public_glev_ntt(builder, params))
         .collect();
-    GgswExpr { rows }
+    GgswNttExpr { rows }
 }
 
-fn alloc_public_glev(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlevExpr {
+fn alloc_public_glev_ntt(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+) -> GlevNttExpr {
     let levels = (0..params.decomposition_level_count)
-        .map(|_| alloc_public_glwe(builder, params))
+        .map(|_| alloc_public_glwe_ntt(builder, params))
         .collect();
-    GlevExpr { levels }
+    GlevNttExpr { levels }
 }
 
-fn alloc_public_glwe(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlweExpr {
+fn alloc_public_glwe_ntt(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+) -> GlweNttExpr {
     let mask = (0..params.glwe_dimension)
-        .map(|_| builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_mask"))
+        .map(|_| builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_mask_ntt"))
         .collect();
-    let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body");
-    GlweExpr { mask, body }
+    let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body_ntt");
+    GlweNttExpr { mask, body }
 }
 
 fn connect_to_constant(
@@ -485,7 +492,7 @@ fn cmux_expr(
     params: &Params,
     c0: &GlweExpr,
     c1: &GlweExpr,
-    selector: &GgswExpr,
+    selector: &GgswNttExpr,
 ) -> GlweExpr {
     let diff = glwe_sub_expr(builder, c1, c0);
     let product = external_product_expr(builder, params, &diff, selector);
@@ -496,7 +503,7 @@ fn external_product_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
     ct: &GlweExpr,
-    ggsw: &GgswExpr,
+    ggsw: &GgswNttExpr,
 ) -> GlweExpr {
     let mut acc = zero_glwe_expr(builder, params);
     for (mask_poly, row) in ct.mask.iter().zip(ggsw.rows.iter()) {
@@ -515,13 +522,13 @@ fn external_product_expr(
 fn glev_external_product_by_plain_poly_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
-    ct: &GlevExpr,
+    ct: &GlevNttExpr,
     poly: &[ExprId],
 ) -> GlweExpr {
     let digits = decompose_poly_expr(builder, params, poly);
     let mut acc = zero_glwe_expr(builder, params);
     for (digit_poly, level_ct) in digits.iter().zip(ct.levels.iter()) {
-        let product = glwe_mul_by_plain_poly_expr(builder, level_ct, digit_poly);
+        let product = glwe_mul_by_ntt_plain_poly_expr(builder, level_ct, digit_poly);
         acc = glwe_add_expr(builder, &acc, &product);
     }
     acc
@@ -577,18 +584,18 @@ fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -
     }
 }
 
-fn glwe_mul_by_plain_poly_expr(
+fn glwe_mul_by_ntt_plain_poly_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
-    ct: &GlweExpr,
+    ct: &GlweNttExpr,
     poly: &[ExprId],
 ) -> GlweExpr {
     GlweExpr {
         mask: ct
             .mask
             .iter()
-            .map(|mask_poly| poly_mul_expr(builder, mask_poly, poly))
+            .map(|mask_poly| poly_mul_ntt_rhs_expr(builder, poly, mask_poly))
             .collect(),
-        body: poly_mul_expr(builder, &ct.body, poly),
+        body: poly_mul_ntt_rhs_expr(builder, poly, &ct.body),
     }
 }
 
@@ -667,21 +674,158 @@ fn poly_mul_expr(
     rhs: &[ExprId],
 ) -> Vec<ExprId> {
     assert_eq!(lhs.len(), rhs.len());
-    let n = lhs.len();
-    let zero = builder.define_const(P3Goldilocks::ZERO);
-    let mut out = vec![zero; n];
-    for (i, &lhs_cell) in lhs.iter().enumerate() {
-        for (j, &rhs_cell) in rhs.iter().enumerate() {
-            let product = builder.mul(lhs_cell, rhs_cell);
-            let target = i + j;
-            if target < n {
-                out[target] = builder.add(out[target], product);
-            } else {
-                out[target - n] = builder.sub(out[target - n], product);
+    let lhs_eval = negacyclic_ntt_expr(builder, lhs);
+    let rhs_eval = negacyclic_ntt_expr(builder, rhs);
+    poly_mul_ntt_evals_expr(builder, &lhs_eval, &rhs_eval)
+}
+
+fn poly_mul_ntt_rhs_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    lhs: &[ExprId],
+    rhs_ntt: &[ExprId],
+) -> Vec<ExprId> {
+    assert_eq!(lhs.len(), rhs_ntt.len());
+    let lhs_eval = negacyclic_ntt_expr(builder, lhs);
+    poly_mul_ntt_evals_expr(builder, &lhs_eval, rhs_ntt)
+}
+
+fn poly_mul_ntt_evals_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    lhs_eval: &[ExprId],
+    rhs_eval: &[ExprId],
+) -> Vec<ExprId> {
+    assert_eq!(lhs_eval.len(), rhs_eval.len());
+
+    let mut product = lhs_eval
+        .iter()
+        .zip(rhs_eval.iter())
+        .map(|(&a, &b)| builder.mul(a, b))
+        .collect::<Vec<_>>();
+
+    negacyclic_intt_expr(builder, &mut product)
+}
+
+fn negacyclic_ntt_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    values: &[ExprId],
+) -> Vec<ExprId> {
+    let n = values.len();
+    assert!(2 * n <= (1usize << GOLDILOCKS_TWO_ADICITY));
+
+    let psi = primitive_power_of_two_root(2 * n);
+    let mut evals = twist_expr(builder, values, psi);
+    ntt_expr(builder, &mut evals, false);
+    evals
+}
+
+fn negacyclic_intt_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    values: &mut [ExprId],
+) -> Vec<ExprId> {
+    let n = values.len();
+    assert!(2 * n <= (1usize << GOLDILOCKS_TWO_ADICITY));
+
+    let psi = primitive_power_of_two_root(2 * n);
+    let psi_inv = psi.inverse().expect("root of unity is nonzero");
+    ntt_expr(builder, values, true);
+    untwist_expr(builder, values, psi_inv)
+}
+
+fn ntt_expr(builder: &mut CircuitBuilder<P3Goldilocks>, values: &mut [ExprId], inverse: bool) {
+    let n = values.len();
+    assert!(n.is_power_of_two());
+    bit_reverse_expr(values);
+
+    let mut len = 2;
+    while len <= n {
+        let mut root = primitive_power_of_two_root(len);
+        if inverse {
+            root = root.inverse().expect("root of unity is nonzero");
+        }
+
+        let half = len / 2;
+        for chunk_start in (0..n).step_by(len) {
+            let mut twiddle = Goldilocks::ONE;
+            for j in 0..half {
+                let left_index = chunk_start + j;
+                let right_index = left_index + half;
+                let u = values[left_index];
+                let v = mul_const_expr(builder, values[right_index], twiddle);
+                values[left_index] = builder.add(u, v);
+                values[right_index] = builder.sub(u, v);
+                twiddle *= root;
             }
         }
+
+        len *= 2;
     }
-    out
+
+    if inverse {
+        let inv_n = Goldilocks::from_u64(n as u64)
+            .inverse()
+            .expect("NTT length is nonzero");
+        for value in values {
+            *value = mul_const_expr(builder, *value, inv_n);
+        }
+    }
+}
+
+fn twist_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    values: &[ExprId],
+    psi: Goldilocks,
+) -> Vec<ExprId> {
+    let mut twiddle = Goldilocks::ONE;
+    values
+        .iter()
+        .map(|&value| {
+            let out = mul_const_expr(builder, value, twiddle);
+            twiddle *= psi;
+            out
+        })
+        .collect()
+}
+
+fn untwist_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    values: &[ExprId],
+    psi_inv: Goldilocks,
+) -> Vec<ExprId> {
+    let mut twiddle = Goldilocks::ONE;
+    values
+        .iter()
+        .map(|&value| {
+            let out = mul_const_expr(builder, value, twiddle);
+            twiddle *= psi_inv;
+            out
+        })
+        .collect()
+}
+
+fn mul_const_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    value: ExprId,
+    constant: Goldilocks,
+) -> ExprId {
+    if constant == Goldilocks::ZERO {
+        builder.define_const(P3Goldilocks::ZERO)
+    } else if constant == Goldilocks::ONE {
+        value
+    } else {
+        let constant = builder.define_const(core_to_p3(constant));
+        builder.mul(value, constant)
+    }
+}
+
+fn bit_reverse_expr(values: &mut [ExprId]) {
+    let n = values.len();
+    let bits = n.trailing_zeros();
+    for i in 0..n {
+        let j = i.reverse_bits() >> (usize::BITS - bits);
+        if i < j {
+            values.swap(i, j);
+        }
+    }
 }
 
 fn mul_xai_expr(

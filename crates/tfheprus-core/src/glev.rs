@@ -1,13 +1,18 @@
 use rand::RngCore;
 
 use crate::field::Goldilocks;
-use crate::glwe::{GlweCiphertext, GlweSecretKey};
+use crate::glwe::{GlweCiphertext, GlweCiphertextNtt, GlweSecretKey};
 use crate::params::Params;
 use crate::poly::Polynomial;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlevCiphertext {
     pub levels: Vec<GlweCiphertext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlevCiphertextNtt {
+    pub levels: Vec<GlweCiphertextNtt>,
 }
 
 impl GlevCiphertext {
@@ -28,6 +33,30 @@ impl GlevCiphertext {
         Self { levels }
     }
 
+    pub fn external_product_by_plain_poly(
+        &self,
+        params: &Params,
+        poly: &Polynomial,
+    ) -> GlweCiphertext {
+        let digits = decompose_polynomial(params, poly);
+        let mut acc = GlweCiphertext::trivial(
+            Polynomial::zero(params.polynomial_size),
+            params.glwe_dimension,
+        );
+        for (digit_poly, level_ct) in digits.iter().zip(self.levels.iter()) {
+            acc = acc.add(&level_ct.mul_by_plain_poly(digit_poly));
+        }
+        acc
+    }
+
+    pub fn to_ntt(&self) -> GlevCiphertextNtt {
+        GlevCiphertextNtt {
+            levels: self.levels.iter().map(GlweCiphertext::to_ntt).collect(),
+        }
+    }
+}
+
+impl GlevCiphertextNtt {
     pub fn external_product_by_plain_poly(
         &self,
         params: &Params,

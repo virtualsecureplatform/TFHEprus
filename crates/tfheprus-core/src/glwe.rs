@@ -3,7 +3,7 @@ use rand::RngCore;
 use crate::field::Goldilocks;
 use crate::lwe::{LweCiphertext, LweSecretKey};
 use crate::params::Params;
-use crate::poly::Polynomial;
+use crate::poly::{NttPolynomial, Polynomial};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlweSecretKey {
@@ -14,6 +14,12 @@ pub struct GlweSecretKey {
 pub struct GlweCiphertext {
     pub mask: Vec<Polynomial>,
     pub body: Polynomial,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlweCiphertextNtt {
+    pub mask: Vec<NttPolynomial>,
+    pub body: NttPolynomial,
 }
 
 impl GlweSecretKey {
@@ -96,7 +102,7 @@ impl GlweCiphertext {
         assert_eq!(mask.len(), sk.dimension());
         let mut body = message.clone();
         for (a, s) in mask.iter().zip(sk.polys()) {
-            body = body.add(&a.mul_naive(s));
+            body = body.add(&a.mul(s));
         }
         assert_eq!(body.len(), params.polynomial_size);
         Self { mask, body }
@@ -106,7 +112,7 @@ impl GlweCiphertext {
         assert_eq!(self.mask.len(), sk.dimension());
         let mut phase = self.body.clone();
         for (a, s) in self.mask.iter().zip(sk.polys()) {
-            phase = phase.sub(&a.mul_naive(s));
+            phase = phase.sub(&a.mul(s));
         }
         phase
     }
@@ -139,8 +145,15 @@ impl GlweCiphertext {
 
     pub fn mul_by_plain_poly(&self, poly: &Polynomial) -> Self {
         Self {
-            mask: self.mask.iter().map(|a| a.mul_naive(poly)).collect(),
-            body: self.body.mul_naive(poly),
+            mask: self.mask.iter().map(|a| a.mul(poly)).collect(),
+            body: self.body.mul(poly),
+        }
+    }
+
+    pub fn to_ntt(&self) -> GlweCiphertextNtt {
+        GlweCiphertextNtt {
+            mask: self.mask.iter().map(Polynomial::to_ntt).collect(),
+            body: self.body.to_ntt(),
         }
     }
 
@@ -158,6 +171,19 @@ impl GlweCiphertext {
         }
         out.extend_from_slice(&self.body.to_le_bytes());
         out
+    }
+}
+
+impl GlweCiphertextNtt {
+    pub fn mul_by_plain_poly(&self, poly: &Polynomial) -> GlweCiphertext {
+        GlweCiphertext {
+            mask: self
+                .mask
+                .iter()
+                .map(|ntt_poly| ntt_poly.mul_polynomial(poly))
+                .collect(),
+            body: self.body.mul_polynomial(poly),
+        }
     }
 }
 

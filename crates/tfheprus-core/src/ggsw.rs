@@ -1,7 +1,7 @@
 use rand::RngCore;
 
 use crate::field::Goldilocks;
-use crate::glev::GlevCiphertext;
+use crate::glev::{GlevCiphertext, GlevCiphertextNtt};
 use crate::glwe::{GlweCiphertext, GlweSecretKey};
 use crate::params::Params;
 use crate::poly::Polynomial;
@@ -9,6 +9,11 @@ use crate::poly::Polynomial;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GgswCiphertext {
     pub rows: Vec<GlevCiphertext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GgswCiphertextNtt {
+    pub rows: Vec<GlevCiphertextNtt>,
 }
 
 impl GgswCiphertext {
@@ -37,12 +42,18 @@ impl GgswCiphertext {
             rows.push(GlevCiphertext::encrypt(
                 params,
                 sk,
-                &message.mul_naive(sk_poly).neg(),
+                &message.mul(sk_poly).neg(),
                 rng,
             ));
         }
         rows.push(GlevCiphertext::encrypt(params, sk, message, rng));
         Self { rows }
+    }
+
+    pub fn to_ntt(&self) -> GgswCiphertextNtt {
+        GgswCiphertextNtt {
+            rows: self.rows.iter().map(GlevCiphertext::to_ntt).collect(),
+        }
     }
 }
 
@@ -50,6 +61,22 @@ pub fn external_product(
     params: &Params,
     ct: &GlweCiphertext,
     ggsw: &GgswCiphertext,
+) -> GlweCiphertext {
+    assert_eq!(ggsw.rows.len(), params.glwe_dimension + 1);
+    let mut acc = GlweCiphertext::trivial(
+        Polynomial::zero(params.polynomial_size),
+        params.glwe_dimension,
+    );
+    for (mask_poly, row) in ct.mask.iter().zip(ggsw.rows.iter()) {
+        acc = acc.add(&row.external_product_by_plain_poly(params, mask_poly));
+    }
+    acc.add(&ggsw.rows[params.glwe_dimension].external_product_by_plain_poly(params, &ct.body))
+}
+
+pub fn external_product_ntt(
+    params: &Params,
+    ct: &GlweCiphertext,
+    ggsw: &GgswCiphertextNtt,
 ) -> GlweCiphertext {
     assert_eq!(ggsw.rows.len(), params.glwe_dimension + 1);
     let mut acc = GlweCiphertext::trivial(
@@ -70,6 +97,16 @@ pub fn cmux(
 ) -> GlweCiphertext {
     let diff = c1.sub(c0);
     external_product(params, &diff, selector).add(c0)
+}
+
+pub fn cmux_ntt(
+    params: &Params,
+    c0: &GlweCiphertext,
+    c1: &GlweCiphertext,
+    selector: &GgswCiphertextNtt,
+) -> GlweCiphertext {
+    let diff = c1.sub(c0);
+    external_product_ntt(params, &diff, selector).add(c0)
 }
 
 #[cfg(test)]
@@ -94,5 +131,7 @@ mod tests {
 
         assert_eq!(cmux(&params, &c0, &c1, &zero).phase(&sk), msg0);
         assert_eq!(cmux(&params, &c0, &c1, &one).phase(&sk), msg1);
+        assert_eq!(cmux_ntt(&params, &c0, &c1, &zero.to_ntt()).phase(&sk), msg0);
+        assert_eq!(cmux_ntt(&params, &c0, &c1, &one.to_ntt()).phase(&sk), msg1);
     }
 }

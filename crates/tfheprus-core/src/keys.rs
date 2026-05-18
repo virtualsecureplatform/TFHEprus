@@ -1,7 +1,7 @@
 use rand::RngCore;
 
 use crate::field::Goldilocks;
-use crate::ggsw::GgswCiphertext;
+use crate::ggsw::{GgswCiphertext, GgswCiphertextNtt};
 use crate::glwe::GlweSecretKey;
 use crate::lwe::LweSecretKey;
 use crate::params::Params;
@@ -15,6 +15,11 @@ pub struct SecretKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvaluationKey {
     pub bootstrapping_key: Vec<GgswCiphertext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvaluationKeyNtt {
+    pub bootstrapping_key: Vec<GgswCiphertextNtt>,
 }
 
 impl SecretKey {
@@ -54,5 +59,15 @@ impl EvaluationKey {
             }
         }
         out
+    }
+
+    pub fn to_ntt(&self) -> EvaluationKeyNtt {
+        EvaluationKeyNtt {
+            bootstrapping_key: self
+                .bootstrapping_key
+                .iter()
+                .map(GgswCiphertext::to_ntt)
+                .collect(),
+        }
     }
 }

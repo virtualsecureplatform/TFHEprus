@@ -9,17 +9,25 @@ pub mod glev;
 pub mod glwe;
 pub mod keys;
 pub mod lwe;
+pub mod ntt;
 pub mod params;
 pub mod pbs;
 pub mod poly;
 pub mod serialization;
 
 pub use field::{Goldilocks, GOLDILOCKS_MODULUS};
-pub use ggsw::{external_product, GgswCiphertext};
-pub use glev::{decompose_polynomial, GlevCiphertext};
-pub use glwe::{sample_extract_index_zero, GlweCiphertext, GlweSecretKey};
-pub use keys::{EvaluationKey, SecretKey};
+pub use ggsw::{external_product, external_product_ntt, GgswCiphertext, GgswCiphertextNtt};
+pub use glev::{decompose_polynomial, GlevCiphertext, GlevCiphertextNtt};
+pub use glwe::{sample_extract_index_zero, GlweCiphertext, GlweCiphertextNtt, GlweSecretKey};
+pub use keys::{EvaluationKey, EvaluationKeyNtt, SecretKey};
 pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};
+pub use ntt::{
+    negacyclic_intt, negacyclic_mul_ntt, negacyclic_ntt, ntt, primitive_power_of_two_root,
+    GOLDILOCKS_TWO_ADICITY,
+};
 pub use params::Params;
-pub use pbs::{blind_rotate, bootstrap_without_keyswitch, mod_switch_to_exponent, TestPolynomial};
-pub use poly::Polynomial;
+pub use pbs::{
+    blind_rotate, blind_rotate_ntt, bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt,
+    mod_switch_to_exponent, TestPolynomial,
+};
+pub use poly::{NttPolynomial, Polynomial};

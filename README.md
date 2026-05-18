@@ -17,11 +17,13 @@ enough to mirror in Plonky3 circuits.
 ## Current Core Coverage
 
 - Goldilocks field arithmetic.
-- Negacyclic polynomial arithmetic in `F_q[X] / (X^N + 1)`.
+- Negacyclic polynomial arithmetic in `F_q[X] / (X^N + 1)`, including a
+  twisted Goldilocks NTT path.
 - LWE and GLWE encryption/decryption with zero-noise semantics for now.
 - GLev/GGSW structures for exact toy decomposition.
-- External product and CMUX.
-- Blind rotation and `bootstrap_without_keyswitch`.
+- External product and CMUX, with coefficient-key and NTT-key variants.
+- Blind rotation and `bootstrap_without_keyswitch`, including an
+  NTT-domain bootstrapping-key path.
 - Sample extraction to an LWE ciphertext under the extracted GLWE key.
 
 `bootstrap_without_keyswitch` deliberately stops before the final TFHE
@@ -37,6 +39,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 PBS PoC for the native nonzero-mask `bootstrap_without_keyswitch`
   path. This includes `mul_xai`, CMUX, GGSW external product, exact gadget
   decomposition with in-circuit bit range checks, and sample extraction.
+- The PBS circuit consumes the bootstrapping key in twisted NTT form, matching
+  the TFHEpp-style transformed-key path and avoiding a key-side NTT inside each
+  polynomial product.
 - Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
@@ -53,9 +58,14 @@ mask rotation. The previous all-zero-mask proof path was removed because it
 skipped CMUX/external-product work.
 
 On the current runner, `cargo run --release -p tfheprus-cli --
-run-actual-pbs-native` completed the native PBS in `native_us=38`, and
-`cargo run --release -p tfheprus-cli -- prove-actual-pbs` completed with
-`prove_us=768595` and `verify_us=7453`.
+run-actual-pbs-native` completed the coefficient-key PBS in
+`native_coeff_us=746`, converted the bootstrapping key to NTT form in
+`key_ntt_precompute_us=189`, and completed the online NTT-key PBS in
+`native_ntt_us=557`. `cargo run --release -p tfheprus-cli --
+prove-actual-pbs` completed with `prove_us=725007` and `verify_us=7742`.
+These are still `Params::toy()` timings; at degree 8, NTT overhead dominates
+the native run, while the proof circuit already benefits from removing the
+key-side transform.
 
 ## Validation
 

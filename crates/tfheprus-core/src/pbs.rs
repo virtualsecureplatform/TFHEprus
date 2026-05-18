@@ -1,7 +1,7 @@
 use crate::field::{Goldilocks, GOLDILOCKS_MODULUS};
-use crate::ggsw::cmux;
+use crate::ggsw::{cmux, cmux_ntt};
 use crate::glwe::{sample_extract_index_zero, GlweCiphertext};
-use crate::keys::EvaluationKey;
+use crate::keys::{EvaluationKey, EvaluationKeyNtt};
 use crate::lwe::{encode_message, LweCiphertext};
 use crate::params::Params;
 use crate::poly::Polynomial;
@@ -54,6 +54,16 @@ pub fn bootstrap_without_keyswitch(
     sample_extract_index_zero(&acc)
 }
 
+pub fn bootstrap_without_keyswitch_ntt(
+    params: &Params,
+    ek: &EvaluationKeyNtt,
+    input: &LweCiphertext,
+    test_polynomial: &TestPolynomial,
+) -> LweCiphertext {
+    let acc = blind_rotate_ntt(params, ek, input, test_polynomial);
+    sample_extract_index_zero(&acc)
+}
+
 pub fn blind_rotate(
     params: &Params,
     ek: &EvaluationKey,
@@ -75,6 +85,31 @@ pub fn blind_rotate(
         }
         let rotated = acc.mul_xai(exponent);
         acc = cmux(params, &acc, &rotated, selector);
+    }
+    acc
+}
+
+pub fn blind_rotate_ntt(
+    params: &Params,
+    ek: &EvaluationKeyNtt,
+    input: &LweCiphertext,
+    test_polynomial: &TestPolynomial,
+) -> GlweCiphertext {
+    assert_eq!(input.mask.len(), params.lwe_dimension);
+    assert_eq!(ek.bootstrapping_key.len(), params.lwe_dimension);
+    let body_exponent = mod_switch_to_exponent(params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let mut acc = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    for (mask_value, selector) in input.mask.iter().zip(ek.bootstrapping_key.iter()) {
+        let exponent = mod_switch_to_exponent(params, *mask_value);
+        if exponent == 0 {
+            continue;
+        }
+        let rotated = acc.mul_xai(exponent);
+        acc = cmux_ntt(params, &acc, &rotated, selector);
     }
     acc
 }
@@ -124,6 +159,8 @@ mod tests {
             .collect();
         let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
         let output = bootstrap_without_keyswitch(&params, &ek, &input, &test_poly);
+        let output_ntt = bootstrap_without_keyswitch_ntt(&params, &ek.to_ntt(), &input, &test_poly);
+        assert_eq!(output_ntt, output);
         assert_eq!(
             output.decrypt(&params, &sk.extracted_output_lwe_key()),
             output_message

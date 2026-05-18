@@ -8,8 +8,8 @@ use tfheprus_circuits::{
     ActualPbsInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::{
-    bootstrap_without_keyswitch, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext, Params,
-    Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
+    bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, EvaluationKey, GlweCiphertext,
+    Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
     prove_actual_pbs, prove_mul_xai, prove_poly_mul, prove_sample_extract, verify_actual_pbs_proof,
@@ -145,18 +145,33 @@ fn prove_actual_pbs_demo() -> Result<(), Box<dyn Error>> {
 fn run_actual_pbs_native_demo() {
     let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials();
 
-    let started = Instant::now();
-    let output = bootstrap_without_keyswitch(&params, &evaluation_key, &input, &test_polynomial);
-    let native_time = started.elapsed();
+    let coeff_started = Instant::now();
+    let coeff_output =
+        bootstrap_without_keyswitch(&params, &evaluation_key, &input, &test_polynomial);
+    let coeff_time = coeff_started.elapsed();
+
+    let key_started = Instant::now();
+    let evaluation_key_ntt = evaluation_key.to_ntt();
+    let key_ntt_time = key_started.elapsed();
+
+    let ntt_started = Instant::now();
+    let output =
+        bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+    let ntt_time = ntt_started.elapsed();
+    assert_eq!(output, coeff_output);
 
     println!(
         "actual-pbs native run: lwe_dimension={}, glwe_dimension={}, degree={}",
         params.lwe_dimension, params.glwe_dimension, params.polynomial_size
     );
     println!(
-        "native_ms={}, native_us={}",
-        native_time.as_millis(),
-        native_time.as_micros()
+        "native_coeff_ms={}, native_coeff_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, native_ntt_ms={}, native_ntt_us={}",
+        coeff_time.as_millis(),
+        coeff_time.as_micros(),
+        key_ntt_time.as_millis(),
+        key_ntt_time.as_micros(),
+        ntt_time.as_millis(),
+        ntt_time.as_micros()
     );
     println!(
         "input_message={}, output_message={}",
