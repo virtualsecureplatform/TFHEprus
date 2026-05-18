@@ -64,7 +64,8 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Public-statement verifier path for recursive PBS chunks. Verification of the
   chunk proof no longer needs the private selected GGSW ciphertexts or mask
   values; it checks params, chunk length, public accumulator endpoints, and
-  digest-chain endpoints.
+  digest-chain endpoints. The verifier rebuilds the expected chunk circuit from
+  params and chunk length and rejects proofs with mismatched circuit metadata.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.

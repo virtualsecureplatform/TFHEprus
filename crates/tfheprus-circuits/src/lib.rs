@@ -853,38 +853,41 @@ pub fn build_actual_pbs_step_chain_circuit(
 pub fn build_actual_pbs_chain_chunk_circuit(
     instance: &ActualPbsChainChunkInstance,
 ) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
-    assert!(instance.params.polynomial_size > 0);
-    assert!(instance.params.polynomial_size.is_power_of_two());
-    assert!(instance.params.glwe_dimension > 0);
-    assert!(!instance.mask_values.is_empty());
-    assert_eq!(instance.mask_values.len(), instance.selectors.len());
+    build_actual_pbs_chain_chunk_shape_circuit(&instance.params, instance.step_count())
+}
+
+pub fn build_actual_pbs_chain_chunk_shape_circuit(
+    params: &Params,
+    step_count: usize,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert!(params.polynomial_size > 0);
+    assert!(params.polynomial_size.is_power_of_two());
+    assert!(params.glwe_dimension > 0);
+    assert!(step_count > 0);
 
     let mut builder = CircuitBuilder::<P3Goldilocks>::new();
-    register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
-    if let Some(error_bits) = decomposition_error_bits(&instance.params) {
+    register_range_check_npo(&mut builder, params.decomposition_base_log);
+    if let Some(error_bits) = decomposition_error_bits(params) {
         register_range_check_npo(&mut builder, error_bits);
     }
 
-    let mut acc = alloc_public_glwe(&mut builder, &instance.params);
+    let mut acc = alloc_public_glwe(&mut builder, params);
     let mut bsk_digest = alloc_public_digest(&mut builder, "actual_pbs_chunk_bsk_digest_in");
     let bsk_digest_out = alloc_public_digest(&mut builder, "actual_pbs_chunk_bsk_digest_out");
     let mut mask_digest = alloc_public_digest(&mut builder, "actual_pbs_chunk_mask_digest_in");
     let mask_digest_out = alloc_public_digest(&mut builder, "actual_pbs_chunk_mask_digest_out");
-    let output_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+    let output_accumulator = alloc_public_glwe(&mut builder, params);
 
-    for _ in 0..instance.step_count() {
-        let selector = alloc_private_ggsw_ntt(&mut builder, &instance.params);
+    for _ in 0..step_count {
+        let selector = alloc_private_ggsw_ntt(&mut builder, params);
         let mask_value = builder.alloc_private_input("actual_pbs_chunk_private_mask_value");
         bsk_digest = digest_update_expr(&mut builder, bsk_digest, ggsw_ntt_expr_values(&selector));
         mask_digest = digest_update_expr(&mut builder, mask_digest, [mask_value]);
 
-        let exponent_bits = mod_switch_exponent_bits_expr(
-            &mut builder,
-            mask_value,
-            instance.params.exponent_modulus(),
-        );
+        let exponent_bits =
+            mod_switch_exponent_bits_expr(&mut builder, mask_value, params.exponent_modulus());
         let rotated = glwe_mul_xai_by_bits_expr(&mut builder, &acc, &exponent_bits);
-        acc = cmux_expr(&mut builder, &instance.params, &acc, &rotated, &selector);
+        acc = cmux_expr(&mut builder, params, &acc, &rotated, &selector);
     }
 
     connect_digest(&mut builder, &bsk_digest, &bsk_digest_out);

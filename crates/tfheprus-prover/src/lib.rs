@@ -5,6 +5,7 @@ mod recursive;
 
 use core::fmt;
 
+use p3_batch_stark::common::CommonData;
 use p3_batch_stark::ProverData;
 use p3_challenger::DuplexChallenger;
 use p3_circuit::circuit::Circuit;
@@ -28,8 +29,8 @@ use range_check::{
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use tfheprus_circuits::{
-    build_actual_pbs_chain_chunk_circuit, build_actual_pbs_circuit,
-    build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
+    build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
+    build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
     build_actual_pbs_step_private_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
     build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
     ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
@@ -444,7 +445,10 @@ pub fn verify_actual_pbs_chain_chunk_statement_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof, &proof.public_inputs)
+    let circuit =
+        build_actual_pbs_chain_chunk_shape_circuit(&statement.params, statement.step_count)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    verify_circuit_proof_for_circuit(&circuit, &proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_actual_pbs_chain_chunk(
@@ -548,6 +552,70 @@ fn verify_circuit_proof(
     prover
         .verify_all_tables(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+}
+
+fn verify_circuit_proof_for_circuit(
+    circuit: &Circuit<P3Goldilocks>,
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    expected_public_inputs: &[P3Goldilocks],
+) -> Result<(), ProofError> {
+    let expected_common = expected_circuit_common_data(circuit, &proof.table_packing)?;
+    if !common_data_matches(&proof.stark_common, &expected_common) {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(proof, expected_public_inputs)
+}
+
+fn expected_circuit_common_data(
+    circuit: &Circuit<P3Goldilocks>,
+    table_packing: &TablePacking,
+) -> Result<CommonData<GoldilocksConfig>, ProofError> {
+    let config = goldilocks_config();
+    let range_bit_counts = range_check_bit_counts(circuit);
+    let range_preprocessors = range_preprocessors(&range_bit_counts);
+    let range_air_builders = range_air_builders(&range_bit_counts);
+    let (airs_degrees, _primitive_columns, _non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
+            circuit,
+            table_packing,
+            &range_preprocessors,
+            &range_air_builders,
+            ConstraintProfile::Standard,
+        )
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+    Ok(ProverData::from_airs_and_degrees(&config, &airs, &degrees).common)
+}
+
+fn common_data_matches(
+    actual: &CommonData<GoldilocksConfig>,
+    expected: &CommonData<GoldilocksConfig>,
+) -> bool {
+    if actual.lookups.len() != expected.lookups.len() {
+        return false;
+    }
+
+    match (&actual.preprocessed, &expected.preprocessed) {
+        (None, None) => true,
+        (Some(actual), Some(expected)) => {
+            actual.commitment == expected.commitment
+                && actual.matrix_to_instance == expected.matrix_to_instance
+                && actual.instances.len() == expected.instances.len()
+                && actual.instances.iter().zip(expected.instances.iter()).all(
+                    |(actual, expected)| match (actual, expected) {
+                        (None, None) => true,
+                        (Some(actual), Some(expected)) => {
+                            actual.matrix_index == expected.matrix_index
+                                && actual.width == expected.width
+                                && actual.degree_bits == expected.degree_bits
+                        }
+                        _ => false,
+                    },
+                )
+        }
+        _ => false,
+    }
 }
 
 fn range_preprocessors(
@@ -885,6 +953,21 @@ mod tests {
         mismatched_statement.public_inputs[0] += P3Goldilocks::ONE;
         assert_eq!(
             verify_actual_pbs_chain_chunk_statement_proof(&mismatched_statement, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_chained_actual_pbs_chunk_wrong_circuit_shape() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let instance = actual_pbs_chain_chunk_instance_with_params(params, 1);
+        let mut proof = prove_actual_pbs_chain_chunk(&instance).unwrap();
+        let mut statement = proof.public_statement();
+        proof.step_count = 2;
+        statement.step_count = 2;
+
+        assert_eq!(
+            verify_actual_pbs_chain_chunk_statement_proof(&statement, &proof),
             Err(ProofError::StatementMismatch)
         );
     }
