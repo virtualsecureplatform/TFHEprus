@@ -34,7 +34,7 @@ use tfheprus_circuits::{
     build_actual_pbs_step_private_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
     build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
     ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::Params;
 
@@ -553,6 +553,39 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
     )
 }
 
+pub fn validate_actual_pbs_chain_chunk_statements(
+    statements: &[ActualPbsChainChunkStatement],
+) -> Result<(), ProofError> {
+    validate_aggregation_leaf_count(statements.len())?;
+    let params = &statements[0].params;
+    let mut total_steps = 0usize;
+    for statement in statements {
+        if &statement.params != params || statement.step_count == 0 {
+            return Err(ProofError::StatementMismatch);
+        }
+        total_steps = total_steps
+            .checked_add(statement.step_count)
+            .ok_or(ProofError::StatementMismatch)?;
+        if total_steps > params.lwe_dimension {
+            return Err(ProofError::StatementMismatch);
+        }
+        chunk_statement_public_view(statement)?;
+    }
+
+    for pair in statements.windows(2) {
+        let left = chunk_statement_public_view(&pair[0])?;
+        let right = chunk_statement_public_view(&pair[1])?;
+        if left.output_accumulator != right.input_accumulator
+            || left.bsk_digest_out != right.bsk_digest_in
+            || left.mask_digest_out != right.mask_digest_in
+        {
+            return Err(ProofError::StatementMismatch);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_tree(
     leaves: Vec<RecursiveActualPbsChainChunkProof>,
 ) -> Result<AggregatedRecursiveActualPbsChainChunkTreeProof, ProofError> {
@@ -599,6 +632,7 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
     if statements.len() != proof.leaves.len() {
         return Err(ProofError::StatementMismatch);
     }
+    validate_actual_pbs_chain_chunk_statements(statements)?;
 
     for (statement, leaf) in statements.iter().zip(proof.leaves.iter()) {
         verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, leaf)?;
@@ -654,6 +688,49 @@ fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> 
         return Err(ProofError::StatementMismatch);
     }
     Ok(())
+}
+
+struct ChunkStatementPublicView<'a> {
+    input_accumulator: &'a [P3Goldilocks],
+    bsk_digest_in: &'a [P3Goldilocks],
+    bsk_digest_out: &'a [P3Goldilocks],
+    mask_digest_in: &'a [P3Goldilocks],
+    mask_digest_out: &'a [P3Goldilocks],
+    output_accumulator: &'a [P3Goldilocks],
+}
+
+fn chunk_statement_public_view(
+    statement: &ActualPbsChainChunkStatement,
+) -> Result<ChunkStatementPublicView<'_>, ProofError> {
+    let glwe_len = (statement.params.glwe_dimension + 1) * statement.params.polynomial_size;
+    let digest_len = SELECTOR_DIGEST_WIDTH;
+    let expected_len = 2 * glwe_len + 4 * digest_len;
+    if statement.public_inputs.len() != expected_len {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    let inputs = &statement.public_inputs;
+    let mut offset = 0usize;
+    let input_accumulator = &inputs[offset..offset + glwe_len];
+    offset += glwe_len;
+    let bsk_digest_in = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let bsk_digest_out = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let mask_digest_in = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let mask_digest_out = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let output_accumulator = &inputs[offset..offset + glwe_len];
+
+    Ok(ChunkStatementPublicView {
+        input_accumulator,
+        bsk_digest_in,
+        bsk_digest_out,
+        mask_digest_in,
+        mask_digest_out,
+        output_accumulator,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1142,6 +1219,65 @@ mod tests {
         mismatched_statement.public_inputs[0] += P3Goldilocks::ONE;
         assert_eq!(
             verify_actual_pbs_chain_chunk_statement_proof(&mismatched_statement, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
+    #[test]
+    fn validates_chained_actual_pbs_chunk_statement_continuity() {
+        let params = Params::new(3, 4, 1, 5, 4, 4);
+        let mut rng = ChaCha20Rng::seed_from_u64(104);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let input_accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+        let first = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[..1].to_vec(),
+            input_accumulator,
+            ek.bootstrapping_key[..1].to_vec(),
+            pbs_bsk_digest_initial(),
+            pbs_mask_digest_initial(),
+        );
+        let second = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[1..].to_vec(),
+            first.output_accumulator.clone(),
+            ek.bootstrapping_key[1..].to_vec(),
+            first.bsk_digest_out,
+            first.mask_digest_out,
+        );
+        let statements = vec![
+            ActualPbsChainChunkStatement::from_instance(&first),
+            ActualPbsChainChunkStatement::from_instance(&second),
+        ];
+
+        validate_actual_pbs_chain_chunk_statements(&statements).unwrap();
+
+        let mut mismatched_accumulator = statements.clone();
+        mismatched_accumulator[1].public_inputs[0] += P3Goldilocks::ONE;
+        assert_eq!(
+            validate_actual_pbs_chain_chunk_statements(&mismatched_accumulator),
+            Err(ProofError::StatementMismatch)
+        );
+
+        let mut too_many_steps = statements.clone();
+        too_many_steps[1].step_count = params.lwe_dimension;
+        assert_eq!(
+            validate_actual_pbs_chain_chunk_statements(&too_many_steps),
             Err(ProofError::StatementMismatch)
         );
     }

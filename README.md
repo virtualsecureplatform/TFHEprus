@@ -216,7 +216,9 @@ as four two-step chunks, matched the native NTT PBS output with
 works at paper shape: `paper-v1 1 3` covered three one-step chunks with
 `layer_sizes=[1,1]`, `root_public_inputs=42364`,
 `leaf_prove_us=105966580`, `aggregate_prove_us=27429504`, and
-`verify_us=24816007`.
+`verify_us=24816007`. Tree verification now also checks that public chunk
+statements form one continuous PBS chain: matching params, bounded total step
+count, accumulator handoff, BSK digest handoff, and mask digest handoff.
 
 Remaining gap to paper-param PBS: run or schedule the full 728-step paper-v1
 prefix under the aggregation tree, package the final aggregate statement
