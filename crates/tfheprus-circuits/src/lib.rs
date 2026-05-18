@@ -204,21 +204,19 @@ impl ActualPbsInstance {
 
     pub fn private_inputs(&self) -> Vec<P3Goldilocks> {
         let mut inputs = Vec::new();
+        append_torus_decomposition_private_inputs(self.input.body, &mut inputs);
         let mut acc = GlweCiphertext::trivial(
             self.test_polynomial.poly.mul_xai(self.initial_exponent),
             self.params.glwe_dimension,
         );
 
-        for ((&exponent, selector), _mask_value) in self
+        for ((&exponent, selector), &mask_value) in self
             .mask_exponents
             .iter()
             .zip(self.evaluation_key.bootstrapping_key.iter())
             .zip(self.input.mask.iter())
         {
-            if exponent == 0 {
-                continue;
-            }
-
+            append_torus_decomposition_private_inputs(mask_value, &mut inputs);
             let rotated = acc.mul_xai(exponent);
             let diff = rotated.sub(&acc);
             for poly in &diff.mask {
@@ -341,25 +339,29 @@ pub fn build_actual_pbs_circuit(
     );
     let output_body = builder.alloc_public_inputs(1, "actual_pbs_output_body");
 
-    for (&cell, &value) in input_mask.iter().zip(instance.input.mask.iter()) {
-        connect_to_constant(&mut builder, cell, value);
-    }
-    connect_to_constant(&mut builder, input_body[0], instance.input.body);
+    let body_exponent_bits = mod_switch_exponent_bits_expr(
+        &mut builder,
+        input_body[0],
+        instance.params.exponent_modulus(),
+    );
+    let initial_exponent_bits =
+        negate_bits_mod_power_of_two_expr(&mut builder, &body_exponent_bits);
 
     let mut acc = GlweExpr {
         mask: vec![
             vec![builder.define_const(P3Goldilocks::ZERO); instance.params.polynomial_size];
             instance.params.glwe_dimension
         ],
-        body: mul_xai_expr(&mut builder, &test_poly, instance.initial_exponent),
+        body: mul_xai_by_bits_expr(&mut builder, &test_poly, &initial_exponent_bits),
     };
 
-    for (&exponent, selector) in instance.mask_exponents.iter().zip(bootstrapping_key.iter()) {
-        if exponent == 0 {
-            continue;
-        }
-
-        let rotated = glwe_mul_xai_expr(&mut builder, &acc, exponent);
+    for (&mask_cell, selector) in input_mask.iter().zip(bootstrapping_key.iter()) {
+        let exponent_bits = mod_switch_exponent_bits_expr(
+            &mut builder,
+            mask_cell,
+            instance.params.exponent_modulus(),
+        );
+        let rotated = glwe_mul_xai_by_bits_expr(&mut builder, &acc, &exponent_bits);
         acc = cmux_expr(&mut builder, &instance.params, &acc, &rotated, selector);
     }
 
@@ -423,6 +425,13 @@ fn append_decomposition_private_inputs(
     }
 }
 
+fn append_torus_decomposition_private_inputs(value: Goldilocks, inputs: &mut Vec<P3Goldilocks>) {
+    for bit_index in 0..64 {
+        let bit = (value.value() >> bit_index) & 1;
+        inputs.push(P3Goldilocks::from_u64(bit));
+    }
+}
+
 fn alloc_public_ggsw_ntt(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
@@ -452,21 +461,6 @@ fn alloc_public_glwe_ntt(
         .collect();
     let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body_ntt");
     GlweNttExpr { mask, body }
-}
-
-fn connect_to_constant(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    cell: ExprId,
-    value: Goldilocks,
-) {
-    if value == Goldilocks::ZERO {
-        let one = builder.define_const(P3Goldilocks::ONE);
-        let must_be_one = builder.add(cell, one);
-        builder.connect(must_be_one, one);
-    } else {
-        let expected = builder.define_const(core_to_p3(value));
-        builder.connect(cell, expected);
-    }
 }
 
 fn connect_sample_extract(
@@ -528,7 +522,8 @@ fn glev_external_product_by_plain_poly_expr(
     let digits = decompose_poly_expr(builder, params, poly);
     let mut acc = zero_glwe_expr(builder, params);
     for (digit_poly, level_ct) in digits.iter().zip(ct.levels.iter()) {
-        let product = glwe_mul_by_ntt_plain_poly_expr(builder, level_ct, digit_poly);
+        let digit_ntt = negacyclic_ntt_expr(builder, digit_poly);
+        let product = glwe_mul_by_plain_poly_ntt_expr(builder, level_ct, &digit_ntt);
         acc = glwe_add_expr(builder, &acc, &product);
     }
     acc
@@ -576,6 +571,83 @@ fn constrain_digit_bits(
     reconstructed
 }
 
+fn mod_switch_exponent_bits_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    value: ExprId,
+    exponent_modulus: usize,
+) -> Vec<ExprId> {
+    assert!(exponent_modulus.is_power_of_two());
+    let exponent_bits = exponent_modulus.trailing_zeros() as usize;
+    let shift = 64 - exponent_bits;
+    let value_bits = decompose_canonical_torus_expr(builder, value);
+    let raw_bits = value_bits[shift..64].to_vec();
+    add_bit_mod_power_of_two_expr(builder, &raw_bits, value_bits[shift - 1])
+}
+
+fn decompose_canonical_torus_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    value: ExprId,
+) -> Vec<ExprId> {
+    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let one = builder.define_const(P3Goldilocks::ONE);
+    let mut reconstructed = zero;
+    let mut low_word = zero;
+    let mut high_all_ones = one;
+    let mut bits = Vec::with_capacity(64);
+
+    for bit_index in 0..64 {
+        let bit = builder.alloc_private_input("torus_bit");
+        builder.assert_bool(bit);
+        bits.push(bit);
+
+        let scale = Goldilocks::from_u64(1u64 << bit_index);
+        let scaled_bit = mul_const_expr(builder, bit, scale);
+        reconstructed = builder.add(reconstructed, scaled_bit);
+
+        if bit_index < 32 {
+            low_word = builder.add(low_word, scaled_bit);
+        } else {
+            high_all_ones = builder.mul(high_all_ones, bit);
+        }
+    }
+
+    builder.connect(value, reconstructed);
+    let canonical_overflow = builder.mul(high_all_ones, low_word);
+    builder.connect(canonical_overflow, zero);
+
+    bits
+}
+
+fn add_bit_mod_power_of_two_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    bits: &[ExprId],
+    addend: ExprId,
+) -> Vec<ExprId> {
+    let mut carry = addend;
+    bits.iter()
+        .map(|&bit| {
+            let bit_and_carry = builder.mul(bit, carry);
+            let bit_plus_carry = builder.add(bit, carry);
+            let two_bit_and_carry = builder.add(bit_and_carry, bit_and_carry);
+            let sum_bit = builder.sub(bit_plus_carry, two_bit_and_carry);
+            carry = bit_and_carry;
+            sum_bit
+        })
+        .collect()
+}
+
+fn negate_bits_mod_power_of_two_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    bits: &[ExprId],
+) -> Vec<ExprId> {
+    let one = builder.define_const(P3Goldilocks::ONE);
+    let inverted = bits
+        .iter()
+        .map(|&bit| builder.sub(one, bit))
+        .collect::<Vec<_>>();
+    add_bit_mod_power_of_two_expr(builder, &inverted, one)
+}
+
 fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlweExpr {
     let zero = builder.define_const(P3Goldilocks::ZERO);
     GlweExpr {
@@ -584,33 +656,33 @@ fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -
     }
 }
 
-fn glwe_mul_by_ntt_plain_poly_expr(
+fn glwe_mul_by_plain_poly_ntt_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     ct: &GlweNttExpr,
-    poly: &[ExprId],
+    poly_ntt: &[ExprId],
 ) -> GlweExpr {
     GlweExpr {
         mask: ct
             .mask
             .iter()
-            .map(|mask_poly| poly_mul_ntt_rhs_expr(builder, poly, mask_poly))
+            .map(|mask_poly| poly_mul_ntt_evals_expr(builder, poly_ntt, mask_poly))
             .collect(),
-        body: poly_mul_ntt_rhs_expr(builder, poly, &ct.body),
+        body: poly_mul_ntt_evals_expr(builder, poly_ntt, &ct.body),
     }
 }
 
-fn glwe_mul_xai_expr(
+fn glwe_mul_xai_by_bits_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     ct: &GlweExpr,
-    exponent: usize,
+    exponent_bits: &[ExprId],
 ) -> GlweExpr {
     GlweExpr {
         mask: ct
             .mask
             .iter()
-            .map(|poly| mul_xai_expr(builder, poly, exponent))
+            .map(|poly| mul_xai_by_bits_expr(builder, poly, exponent_bits))
             .collect(),
-        body: mul_xai_expr(builder, &ct.body, exponent),
+        body: mul_xai_by_bits_expr(builder, &ct.body, exponent_bits),
     }
 }
 
@@ -677,16 +749,6 @@ fn poly_mul_expr(
     let lhs_eval = negacyclic_ntt_expr(builder, lhs);
     let rhs_eval = negacyclic_ntt_expr(builder, rhs);
     poly_mul_ntt_evals_expr(builder, &lhs_eval, &rhs_eval)
-}
-
-fn poly_mul_ntt_rhs_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    lhs: &[ExprId],
-    rhs_ntt: &[ExprId],
-) -> Vec<ExprId> {
-    assert_eq!(lhs.len(), rhs_ntt.len());
-    let lhs_eval = negacyclic_ntt_expr(builder, lhs);
-    poly_mul_ntt_evals_expr(builder, &lhs_eval, rhs_ntt)
 }
 
 fn poly_mul_ntt_evals_expr(
@@ -847,6 +909,43 @@ fn mul_xai_expr(
         }
     }
     out
+}
+
+fn mul_xai_by_bits_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    poly: &[ExprId],
+    exponent_bits: &[ExprId],
+) -> Vec<ExprId> {
+    let mut current = poly.to_vec();
+    for (bit_index, &bit) in exponent_bits.iter().enumerate() {
+        let rotated = mul_xai_expr(builder, &current, 1usize << bit_index);
+        current = select_poly_expr(builder, bit, &current, &rotated);
+    }
+    current
+}
+
+fn select_poly_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    selector: ExprId,
+    when_zero: &[ExprId],
+    when_one: &[ExprId],
+) -> Vec<ExprId> {
+    when_zero
+        .iter()
+        .zip(when_one.iter())
+        .map(|(&zero_value, &one_value)| select_expr(builder, selector, zero_value, one_value))
+        .collect()
+}
+
+fn select_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    selector: ExprId,
+    when_zero: ExprId,
+    when_one: ExprId,
+) -> ExprId {
+    let delta = builder.sub(when_one, when_zero);
+    let selected_delta = builder.mul(selector, delta);
+    builder.add(when_zero, selected_delta)
 }
 
 fn sub_from_zero(builder: &mut CircuitBuilder<P3Goldilocks>, value: ExprId) -> ExprId {

@@ -39,6 +39,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 PBS PoC for the native nonzero-mask `bootstrap_without_keyswitch`
   path. This includes `mul_xai`, CMUX, GGSW external product, exact gadget
   decomposition with in-circuit bit range checks, and sample extraction.
+- The PBS circuit derives the rounded mod-switch rotation bits from the public
+  LWE body and mask values in-circuit; these values are no longer only
+  statement-specific compile-time rotation constants.
 - The PBS circuit consumes the bootstrapping key in twisted NTT form, matching
   the TFHEpp-style transformed-key path and avoiding a key-side NTT inside each
   polynomial product.
@@ -64,7 +67,7 @@ run-actual-pbs-native` completed the coefficient-key PBS in
 `native_coeff_us=823`, converted the bootstrapping key to NTT form in
 `key_ntt_precompute_us=210`, and completed the online NTT-key PBS in
 `native_ntt_us=619`. `cargo run --release -p tfheprus-cli --
-prove-actual-pbs` completed with `prove_us=778564` and `verify_us=8440`.
+prove-actual-pbs` completed with `prove_us=739371` and `verify_us=7890`.
 These are still `Params::toy()` timings; at degree 8, NTT overhead dominates
 the native run, while the proof circuit already benefits from removing the
 key-side transform.
@@ -73,9 +76,9 @@ key-side transform.
 `n=32, N=64, k=1, B=2^16, l=4, p=4`, which is still an exact-decomposition
 toy preset rather than a secure TFHE parameter set. On the current runner,
 `profile-actual-pbs moderate` reports `public_inputs=32930` and
-`private_inputs=278528`. `run-actual-pbs-native moderate` completed with
-`eval_keygen_us=4638`, `native_coeff_us=8721`, `key_ntt_precompute_us=2258`,
-and `native_ntt_us=5796`. The moderate proof command is intentionally not
+`private_inputs=280640`. `run-actual-pbs-native moderate` completed with
+`eval_keygen_us=4185`, `native_coeff_us=7144`, `key_ntt_precompute_us=2015`,
+and `native_ntt_us=4242`. The moderate proof command is intentionally not
 enabled by default; this preset is for measuring native and statement-size
 growth before attempting a much larger proof.
 

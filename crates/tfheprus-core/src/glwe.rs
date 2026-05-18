@@ -176,13 +176,14 @@ impl GlweCiphertext {
 
 impl GlweCiphertextNtt {
     pub fn mul_by_plain_poly(&self, poly: &Polynomial) -> GlweCiphertext {
+        let poly_ntt = poly.to_ntt();
         GlweCiphertext {
             mask: self
                 .mask
                 .iter()
-                .map(|ntt_poly| ntt_poly.mul_polynomial(poly))
+                .map(|ntt_poly| ntt_poly.mul_ntt(&poly_ntt))
                 .collect(),
-            body: self.body.mul_polynomial(poly),
+            body: self.body.mul_ntt(&poly_ntt),
         }
     }
 }

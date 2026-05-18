@@ -1,4 +1,6 @@
-use crate::field::{Goldilocks, GOLDILOCKS_MODULUS};
+use crate::field::Goldilocks;
+#[cfg(test)]
+use crate::field::GOLDILOCKS_MODULUS;
 use crate::ggsw::{cmux, cmux_ntt};
 use crate::glwe::{sample_extract_index_zero, GlweCiphertext};
 use crate::keys::{EvaluationKey, EvaluationKeyNtt};
@@ -115,9 +117,12 @@ pub fn blind_rotate_ntt(
 }
 
 pub fn mod_switch_to_exponent(params: &Params, value: Goldilocks) -> usize {
-    let numerator = value.value() as u128 * params.exponent_modulus() as u128;
-    let rounded = (numerator + (GOLDILOCKS_MODULUS as u128 / 2)) / GOLDILOCKS_MODULUS as u128;
-    (rounded as usize) % params.exponent_modulus()
+    let modulus = params.exponent_modulus();
+    assert!(modulus.is_power_of_two());
+    let exponent_bits = modulus.trailing_zeros() as usize;
+    let shift = 64 - exponent_bits;
+    let rounded = (value.value() as u128 + (1u128 << (shift - 1))) >> shift;
+    (rounded as usize) % modulus
 }
 
 fn plaintext_exponent(params: &Params, message: u64) -> usize {
@@ -143,6 +148,18 @@ mod tests {
     use super::*;
     use crate::keys::{EvaluationKey, SecretKey};
     use crate::lwe::LweCiphertext;
+
+    #[test]
+    fn mod_switch_rounds_against_power_of_two_torus() {
+        for params in [Params::toy(), Params::moderate_toy(), Params::paper_v1()] {
+            let modulus = params.exponent_modulus();
+            let step = GOLDILOCKS_MODULUS / modulus as u64;
+            for exponent in 0..modulus {
+                let value = Goldilocks::from_u64(step * exponent as u64);
+                assert_eq!(mod_switch_to_exponent(&params, value), exponent);
+            }
+        }
+    }
 
     #[test]
     fn nonzero_mask_bootstrap_applies_single_slot_test_polynomial() {
