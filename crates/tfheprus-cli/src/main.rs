@@ -378,11 +378,12 @@ fn prove_pbs_chain_chunk_recursive_demo(
     let verify_time = verify_started.elapsed();
 
     println!(
-        "pbs-chain-chunk recursive proof verified: preset={}, steps={}, recursive_tables={}, recursive_public_inputs={}",
+        "pbs-chain-chunk recursive proof verified: preset={}, steps={}, recursive_tables={}, recursive_public_inputs={}, chain_summary_fields={}",
         preset.name(),
         proof.base.step_count,
         proof.recursion.table_count(),
-        proof.recursion.public_input_count()
+        proof.recursion.public_input_count(),
+        proof.chain_summary.field_values().len()
     );
     println!(
         "prove_ms={}, prove_us={}, verify_ms={}, verify_us={}",
@@ -576,14 +577,15 @@ fn prove_pbs_chain_pair_aggregate_recursive_demo(
     let verify_time = verify_started.elapsed();
 
     println!(
-        "pbs-chain-pair aggregate recursive proof verified: preset={}, chunk_steps={}, covered_steps=0..{}, left_recursive_inputs={}, right_recursive_inputs={}, aggregate_tables={}, aggregate_public_inputs={}",
+        "pbs-chain-pair aggregate recursive proof verified: preset={}, chunk_steps={}, covered_steps=0..{}, left_recursive_inputs={}, right_recursive_inputs={}, aggregate_tables={}, aggregate_public_inputs={}, chain_summary_fields={}",
         preset.name(),
         chunk_step_count,
         right_end,
         proof.left.recursion.public_input_count(),
         proof.right.recursion.public_input_count(),
         proof.aggregation.table_count(),
-        proof.aggregation.public_input_count()
+        proof.aggregation.public_input_count(),
+        proof.chain_summary.field_values().len()
     );
     println!(
         "left_prove_ms={}, left_prove_us={}, right_prove_ms={}, right_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}",
@@ -709,7 +711,7 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "pbs-chain-tree aggregate recursive proof verified: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}",
+        "pbs-chain-tree aggregate recursive proof verified: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}, chain_summary_fields={}",
         preset.name(),
         chunk_step_count,
         chunk_count,
@@ -718,7 +720,8 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         proof.layer_count(),
         layer_sizes,
         proof.root_table_count().unwrap_or(0),
-        proof.root_public_input_count().unwrap_or(0)
+        proof.root_public_input_count().unwrap_or(0),
+        proof.chain_summary.field_values().len()
     );
     println!(
         "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
@@ -762,6 +765,7 @@ fn profile_pbs_chain_tree_demo(
     let layer_sizes = aggregation_layer_sizes(chunk_count);
     let aggregation_nodes = layer_sizes.iter().sum::<usize>();
     let chunk_public_inputs = estimated_chain_chunk_public_inputs(&params);
+    let chain_summary_fields = chunk_public_inputs + 7;
     let step_private_inputs = estimated_chain_chunk_step_private_inputs(&params);
     let full_chunk_private_inputs = estimated_chain_chunk_private_inputs(&params, chunk_step_count);
     let last_chunk_private_inputs = estimated_chain_chunk_private_inputs(&params, last_chunk_steps);
@@ -794,8 +798,9 @@ fn profile_pbs_chain_tree_demo(
             .join(",")
     );
     println!(
-        "leaf_shape: chunk_public_inputs={}, step_private_inputs={}, full_chunk_private_inputs={}, last_chunk_private_inputs={}, total_leaf_private_inputs={}, total_leaf_private_mib={:.2}",
+        "leaf_shape: chunk_public_inputs={}, chain_summary_fields={}, step_private_inputs={}, full_chunk_private_inputs={}, last_chunk_private_inputs={}, total_leaf_private_inputs={}, total_leaf_private_mib={:.2}",
         chunk_public_inputs,
+        chain_summary_fields,
         step_private_inputs,
         full_chunk_private_inputs,
         last_chunk_private_inputs,

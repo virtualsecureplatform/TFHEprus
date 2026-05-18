@@ -200,11 +200,12 @@ with `base_private_inputs=114948`, `recursive_public_inputs=4204`,
 The first aggregation layer is live for recursive chunk proofs:
 `cargo run --release -p tfheprus-cli --
 prove-pbs-chain-pair-aggregate-recursive toy 2` covered steps `0..4` as two
-recursive two-step chunks and aggregated them with `aggregate_public_inputs=596`,
-`aggregate_prove_us=11903287`, and `verify_us=543349`. The same path works at
-paper shape: `paper-v1 1` covered steps `0..2` as two one-step chunks and
-aggregated them with `aggregate_public_inputs=16914`,
-`aggregate_prove_us=13627661`, and `verify_us=15987374`.
+recursive two-step chunks and aggregated them with `aggregate_public_inputs=871`,
+`chain_summary_fields=55`, `aggregate_prove_us=11945243`, and
+`verify_us=455298`. The same path works at paper shape: `paper-v1 1` covered
+steps `0..2` as two one-step chunks and aggregated them with
+`aggregate_public_inputs=37509`, `chain_summary_fields=4119`,
+`aggregate_prove_us=13614488`, and `verify_us=15833332`.
 
 The recursive aggregation tree now reduces more than two chunk proofs to one
 root and carries odd nodes upward, so it does not require a power-of-two leaf
@@ -212,20 +213,23 @@ count. `cargo run --release -p tfheprus-cli --
 prove-pbs-chain-tree-aggregate-recursive toy 2 4` covered all 8 toy PBS steps
 as four two-step chunks, matched the native NTT PBS output with
 `full_tree_output_message=3`, and produced a two-layer tree with
-`layer_sizes=[2,1]`, `root_public_inputs=2522`,
-`aggregate_prove_us=35863716`, and `verify_us=1355705`. The odd-leaf path also
+`layer_sizes=[2,1]`, `root_public_inputs=3677`, `chain_summary_fields=55`,
+`aggregate_prove_us=35806594`, and `verify_us=1131877`. The odd-leaf path also
 works at paper shape: `paper-v1 1 3` covered three one-step chunks with
-`layer_sizes=[1,1]`, `root_public_inputs=42364`,
-`leaf_prove_us=105966580`, `aggregate_prove_us=27429504`, and
-`verify_us=24816007`. Tree verification now also checks that public chunk
-statements form one continuous PBS chain: matching params, bounded total step
-count, accumulator handoff, BSK digest handoff, and mask digest handoff.
+`layer_sizes=[1,1]`, `root_public_inputs=95906`,
+`chain_summary_fields=4119`, `leaf_prove_us=105279811`,
+`aggregate_prove_us=32910907`, and `verify_us=24014646`. Tree verification now
+also checks that public chunk statements form one continuous PBS chain: matching
+params, bounded total step count, accumulator handoff, BSK digest handoff, and
+mask digest handoff. The recursive leaf and aggregate circuits expose this
+PBS-chain summary as public inputs and constrain summary composition in-circuit.
 
 For planning full paper-v1 runs without allocating keys or proving, the tree
 profiler reports the chunk schedule and leaf statement sizes. `cargo run -p
 tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `tree_depth=7`, `aggregation_nodes=90`, `layer_sizes=[45,23,11,6,3,1,1]`,
-`chunk_public_inputs=4112`, `step_private_inputs=28737`,
+`chunk_public_inputs=4112`, `chain_summary_fields=4119`,
+`step_private_inputs=28737`,
 `full_chunk_private_inputs=229896`, and
 `total_leaf_private_inputs=20920536`.
 

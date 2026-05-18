@@ -17,7 +17,7 @@ use p3_circuit_prover::{
 };
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -112,20 +112,87 @@ impl ActualPbsChainChunkStatement {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsChainSummary {
+    pub params: Params,
+    pub step_count: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+}
+
+impl ActualPbsChainSummary {
+    pub fn from_chunk_statement(
+        statement: &ActualPbsChainChunkStatement,
+    ) -> Result<Self, ProofError> {
+        chunk_statement_public_view(statement)?;
+        Ok(Self {
+            params: statement.params.clone(),
+            step_count: statement.step_count,
+            public_inputs: statement.public_inputs.clone(),
+        })
+    }
+
+    pub fn combine(left: &Self, right: &Self) -> Result<Self, ProofError> {
+        if left.params != right.params || left.step_count == 0 || right.step_count == 0 {
+            return Err(ProofError::StatementMismatch);
+        }
+        let step_count = left
+            .step_count
+            .checked_add(right.step_count)
+            .ok_or(ProofError::StatementMismatch)?;
+        if step_count > left.params.lwe_dimension {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let left_view = chunk_summary_public_view(left)?;
+        let right_view = chunk_summary_public_view(right)?;
+        if left_view.output_accumulator != right_view.input_accumulator
+            || left_view.bsk_digest_out != right_view.bsk_digest_in
+            || left_view.mask_digest_out != right_view.mask_digest_in
+        {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let mut public_inputs = Vec::with_capacity(left.public_inputs.len());
+        public_inputs.extend_from_slice(left_view.input_accumulator);
+        public_inputs.extend_from_slice(left_view.bsk_digest_in);
+        public_inputs.extend_from_slice(right_view.bsk_digest_out);
+        public_inputs.extend_from_slice(left_view.mask_digest_in);
+        public_inputs.extend_from_slice(right_view.mask_digest_out);
+        public_inputs.extend_from_slice(right_view.output_accumulator);
+
+        Ok(Self {
+            params: left.params.clone(),
+            step_count,
+            public_inputs,
+        })
+    }
+
+    pub fn field_values(&self) -> Vec<P3Goldilocks> {
+        let mut values = Vec::with_capacity(chain_summary_field_count(&self.params));
+        values.extend(param_public_values(&self.params));
+        values.push(P3Goldilocks::from_u64(self.step_count as u64));
+        values.extend(self.public_inputs.iter().copied());
+        values
+    }
+}
+
 pub struct RecursiveActualPbsChainChunkProof {
     pub base: ActualPbsChainChunkProof,
     pub recursion: recursive::RecursiveBatchProof,
+    pub chain_summary: ActualPbsChainSummary,
 }
 
 pub struct AggregatedRecursiveActualPbsChainChunkPairProof {
     pub left: RecursiveActualPbsChainChunkProof,
     pub right: RecursiveActualPbsChainChunkProof,
     pub aggregation: recursive::AggregatedRecursiveBatchProof,
+    pub chain_summary: ActualPbsChainSummary,
 }
 
 pub struct AggregatedRecursiveActualPbsChainChunkTreeProof {
     pub leaves: Vec<RecursiveActualPbsChainChunkProof>,
     pub layers: Vec<Vec<recursive::AggregatedRecursiveBatchProof>>,
+    pub chain_summary: ActualPbsChainSummary,
 }
 
 impl AggregatedRecursiveActualPbsChainChunkTreeProof {
@@ -497,9 +564,18 @@ pub fn prove_recursive_actual_pbs_chain_chunk(
     instance: &ActualPbsChainChunkInstance,
 ) -> Result<RecursiveActualPbsChainChunkProof, ProofError> {
     let base = prove_actual_pbs_chain_chunk(instance)?;
-    let recursion = recursive::prove_recursive_batch(&base.proof)?;
+    let chain_summary = ActualPbsChainSummary::from_chunk_statement(&base.public_statement())?;
+    let recursion = recursive::prove_recursive_batch_with_leaf_summary(
+        &base.proof,
+        &chain_summary.field_values(),
+        chain_summary_header_len(),
+    )?;
 
-    Ok(RecursiveActualPbsChainChunkProof { base, recursion })
+    Ok(RecursiveActualPbsChainChunkProof {
+        base,
+        recursion,
+        chain_summary,
+    })
 }
 
 pub fn verify_recursive_actual_pbs_chain_chunk_proof(
@@ -507,7 +583,8 @@ pub fn verify_recursive_actual_pbs_chain_chunk_proof(
     proof: &RecursiveActualPbsChainChunkProof,
 ) -> Result<(), ProofError> {
     verify_actual_pbs_chain_chunk_proof(instance, &proof.base)?;
-    recursive::verify_recursive_batch_for_base(&proof.base.proof, &proof.recursion)
+    let statement = ActualPbsChainChunkStatement::from_instance(instance);
+    verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, proof)
 }
 
 pub fn verify_recursive_actual_pbs_chain_chunk_statement_proof(
@@ -515,7 +592,15 @@ pub fn verify_recursive_actual_pbs_chain_chunk_statement_proof(
     proof: &RecursiveActualPbsChainChunkProof,
 ) -> Result<(), ProofError> {
     verify_actual_pbs_chain_chunk_statement_proof(statement, &proof.base)?;
-    recursive::verify_recursive_batch_for_base(&proof.base.proof, &proof.recursion)
+    let expected_summary = ActualPbsChainSummary::from_chunk_statement(statement)?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_recursive_batch_with_leaf_summary_for_base(
+        &proof.base.proof,
+        &proof.chain_summary.field_values(),
+        &proof.recursion,
+    )
 }
 
 pub fn prove_and_verify_recursive_actual_pbs_chain_chunk(
@@ -529,13 +614,19 @@ pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_pair(
     left: RecursiveActualPbsChainChunkProof,
     right: RecursiveActualPbsChainChunkProof,
 ) -> Result<AggregatedRecursiveActualPbsChainChunkPairProof, ProofError> {
-    let aggregation =
-        recursive::prove_aggregate_recursive_batches(&left.recursion, &right.recursion)?;
+    let chain_summary = ActualPbsChainSummary::combine(&left.chain_summary, &right.chain_summary)?;
+    let aggregation = recursive::prove_aggregate_batch_proofs_with_chain_summary(
+        left.recursion.batch_proof(),
+        right.recursion.batch_proof(),
+        &chain_summary.field_values(),
+        Some(&chain_summary_layout(&chain_summary.params)),
+    )?;
 
     Ok(AggregatedRecursiveActualPbsChainChunkPairProof {
         left,
         right,
         aggregation,
+        chain_summary,
     })
 }
 
@@ -546,9 +637,15 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
 ) -> Result<(), ProofError> {
     verify_recursive_actual_pbs_chain_chunk_statement_proof(left_statement, &proof.left)?;
     verify_recursive_actual_pbs_chain_chunk_statement_proof(right_statement, &proof.right)?;
-    recursive::verify_aggregated_recursive_batch_for_children(
-        &proof.left.recursion,
-        &proof.right.recursion,
+    let expected_summary =
+        ActualPbsChainSummary::combine(&proof.left.chain_summary, &proof.right.chain_summary)?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_summary_for_child_proofs(
+        proof.left.recursion.batch_proof(),
+        proof.right.recursion.batch_proof(),
+        &proof.chain_summary.field_values(),
         &proof.aggregation,
     )
 }
@@ -595,33 +692,61 @@ pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_tree(
     let mut current_nodes = (0..leaves.len())
         .map(AggregationNodeRef::Leaf)
         .collect::<Vec<_>>();
+    let mut current_summaries = leaves
+        .iter()
+        .map(|leaf| leaf.chain_summary.clone())
+        .collect::<Vec<_>>();
     while current_nodes.len() > 1 {
         let layer_index = layers.len();
         let pair_count = current_nodes.len() / 2;
         let mut next_layer = Vec::with_capacity(pair_count);
         let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        let mut next_summaries = Vec::with_capacity(current_summaries.len().div_ceil(2));
         for node_index in 0..pair_count {
             let left =
                 aggregation_node_batch_proof(current_nodes[node_index * 2], &leaves, &layers);
             let right =
                 aggregation_node_batch_proof(current_nodes[node_index * 2 + 1], &leaves, &layers);
-            next_layer.push(recursive::prove_aggregate_batch_proofs(left, right)?);
+            let chain_summary = ActualPbsChainSummary::combine(
+                &current_summaries[node_index * 2],
+                &current_summaries[node_index * 2 + 1],
+            )?;
+            next_layer.push(recursive::prove_aggregate_batch_proofs_with_chain_summary(
+                left,
+                right,
+                &chain_summary.field_values(),
+                Some(&chain_summary_layout(&chain_summary.params)),
+            )?);
             next_nodes.push(AggregationNodeRef::Aggregate {
                 layer_index,
                 node_index,
             });
+            next_summaries.push(chain_summary);
         }
-        if let Some(&carried_node) = current_nodes
-            .last()
-            .filter(|_| current_nodes.len() % 2 == 1)
-        {
+        if current_nodes.len() % 2 == 1 {
+            let carried_node = *current_nodes.last().ok_or(ProofError::StatementMismatch)?;
             next_nodes.push(carried_node);
+            next_summaries.push(
+                current_summaries
+                    .last()
+                    .ok_or(ProofError::StatementMismatch)?
+                    .clone(),
+            );
         }
         layers.push(next_layer);
         current_nodes = next_nodes;
+        current_summaries = next_summaries;
     }
 
-    Ok(AggregatedRecursiveActualPbsChainChunkTreeProof { leaves, layers })
+    let chain_summary = current_summaries
+        .pop()
+        .ok_or(ProofError::StatementMismatch)?;
+
+    Ok(AggregatedRecursiveActualPbsChainChunkTreeProof {
+        leaves,
+        layers,
+        chain_summary,
+    })
 }
 
 pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
@@ -633,6 +758,10 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
         return Err(ProofError::StatementMismatch);
     }
     validate_actual_pbs_chain_chunk_statements(statements)?;
+    let expected_summary = chain_summary_from_statements(statements)?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
 
     for (statement, leaf) in statements.iter().zip(proof.leaves.iter()) {
         verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, leaf)?;
@@ -640,6 +769,11 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
 
     let mut current_nodes = (0..proof.leaves.len())
         .map(AggregationNodeRef::Leaf)
+        .collect::<Vec<_>>();
+    let mut current_summaries = proof
+        .leaves
+        .iter()
+        .map(|leaf| leaf.chain_summary.clone())
         .collect::<Vec<_>>();
     for (layer_index, layer) in proof.layers.iter().enumerate() {
         if current_nodes.len() <= 1 {
@@ -651,6 +785,7 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
         }
 
         let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        let mut next_summaries = Vec::with_capacity(current_summaries.len().div_ceil(2));
         for (node_index, aggregate) in layer.iter().enumerate() {
             let left = aggregation_node_batch_proof(
                 current_nodes[node_index * 2],
@@ -662,22 +797,40 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
                 &proof.leaves,
                 &proof.layers,
             );
-            recursive::verify_aggregated_recursive_batch_for_child_proofs(left, right, aggregate)?;
+            let chain_summary = ActualPbsChainSummary::combine(
+                &current_summaries[node_index * 2],
+                &current_summaries[node_index * 2 + 1],
+            )?;
+            recursive::verify_aggregated_recursive_batch_with_summary_for_child_proofs(
+                left,
+                right,
+                &chain_summary.field_values(),
+                aggregate,
+            )?;
             next_nodes.push(AggregationNodeRef::Aggregate {
                 layer_index,
                 node_index,
             });
+            next_summaries.push(chain_summary);
         }
-        if let Some(&carried_node) = current_nodes
-            .last()
-            .filter(|_| current_nodes.len() % 2 == 1)
-        {
+        if current_nodes.len() % 2 == 1 {
+            let carried_node = *current_nodes.last().ok_or(ProofError::StatementMismatch)?;
             next_nodes.push(carried_node);
+            next_summaries.push(
+                current_summaries
+                    .last()
+                    .ok_or(ProofError::StatementMismatch)?
+                    .clone(),
+            );
         }
         current_nodes = next_nodes;
+        current_summaries = next_summaries;
     }
 
-    if current_nodes.len() != 1 {
+    if current_nodes.len() != 1 || current_summaries.len() != 1 {
+        return Err(ProofError::StatementMismatch);
+    }
+    if current_summaries[0] != proof.chain_summary {
         return Err(ProofError::StatementMismatch);
     }
     Ok(())
@@ -688,6 +841,72 @@ fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> 
         return Err(ProofError::StatementMismatch);
     }
     Ok(())
+}
+
+fn chain_summary_from_statements(
+    statements: &[ActualPbsChainChunkStatement],
+) -> Result<ActualPbsChainSummary, ProofError> {
+    let mut summaries = statements
+        .iter()
+        .map(ActualPbsChainSummary::from_chunk_statement);
+    let first = summaries.next().ok_or(ProofError::StatementMismatch)??;
+    summaries.try_fold(first, |acc, summary| {
+        ActualPbsChainSummary::combine(&acc, &summary?)
+    })
+}
+
+fn chain_summary_header_len() -> usize {
+    param_public_value_count() + 1
+}
+
+fn chain_summary_field_count(params: &Params) -> usize {
+    chain_summary_header_len() + chain_chunk_public_field_count(params)
+}
+
+fn chain_chunk_public_field_count(params: &Params) -> usize {
+    2 * chain_glwe_field_count(params) + 4 * SELECTOR_DIGEST_WIDTH
+}
+
+fn chain_glwe_field_count(params: &Params) -> usize {
+    (params.glwe_dimension + 1) * params.polynomial_size
+}
+
+fn param_public_value_count() -> usize {
+    6
+}
+
+fn param_public_values(params: &Params) -> [P3Goldilocks; 6] {
+    [
+        P3Goldilocks::from_u64(params.lwe_dimension as u64),
+        P3Goldilocks::from_u64(params.polynomial_size as u64),
+        P3Goldilocks::from_u64(params.glwe_dimension as u64),
+        P3Goldilocks::from_u64(params.decomposition_base_log as u64),
+        P3Goldilocks::from_u64(params.decomposition_level_count as u64),
+        P3Goldilocks::from_u64(params.plaintext_modulus),
+    ]
+}
+
+fn chain_summary_layout(params: &Params) -> recursive::ChainSummaryLayout {
+    let glwe_len = chain_glwe_field_count(params);
+    let digest_len = SELECTOR_DIGEST_WIDTH;
+    let header_len = chain_summary_header_len();
+    let input_accumulator = header_len..header_len + glwe_len;
+    let bsk_digest_in = input_accumulator.end..input_accumulator.end + digest_len;
+    let bsk_digest_out = bsk_digest_in.end..bsk_digest_in.end + digest_len;
+    let mask_digest_in = bsk_digest_out.end..bsk_digest_out.end + digest_len;
+    let mask_digest_out = mask_digest_in.end..mask_digest_in.end + digest_len;
+    let output_accumulator = mask_digest_out.end..mask_digest_out.end + glwe_len;
+    recursive::ChainSummaryLayout {
+        params: 0..param_public_value_count(),
+        step_count: param_public_value_count(),
+        input_accumulator,
+        bsk_digest_in,
+        bsk_digest_out,
+        mask_digest_in,
+        mask_digest_out,
+        output_accumulator: output_accumulator.clone(),
+        len: output_accumulator.end,
+    }
 }
 
 struct ChunkStatementPublicView<'a> {
@@ -702,14 +921,27 @@ struct ChunkStatementPublicView<'a> {
 fn chunk_statement_public_view(
     statement: &ActualPbsChainChunkStatement,
 ) -> Result<ChunkStatementPublicView<'_>, ProofError> {
-    let glwe_len = (statement.params.glwe_dimension + 1) * statement.params.polynomial_size;
+    chunk_public_view(&statement.params, &statement.public_inputs)
+}
+
+fn chunk_summary_public_view(
+    summary: &ActualPbsChainSummary,
+) -> Result<ChunkStatementPublicView<'_>, ProofError> {
+    chunk_public_view(&summary.params, &summary.public_inputs)
+}
+
+fn chunk_public_view<'a>(
+    params: &Params,
+    public_inputs: &'a [P3Goldilocks],
+) -> Result<ChunkStatementPublicView<'a>, ProofError> {
+    let glwe_len = chain_glwe_field_count(params);
     let digest_len = SELECTOR_DIGEST_WIDTH;
     let expected_len = 2 * glwe_len + 4 * digest_len;
-    if statement.public_inputs.len() != expected_len {
+    if public_inputs.len() != expected_len {
         return Err(ProofError::StatementMismatch);
     }
 
-    let inputs = &statement.public_inputs;
+    let inputs = public_inputs;
     let mut offset = 0usize;
     let input_accumulator = &inputs[offset..offset + glwe_len];
     offset += glwe_len;
@@ -1266,6 +1498,15 @@ mod tests {
         ];
 
         validate_actual_pbs_chain_chunk_statements(&statements).unwrap();
+        let first_summary = ActualPbsChainSummary::from_chunk_statement(&statements[0]).unwrap();
+        let second_summary = ActualPbsChainSummary::from_chunk_statement(&statements[1]).unwrap();
+        let combined_summary =
+            ActualPbsChainSummary::combine(&first_summary, &second_summary).unwrap();
+        assert_eq!(combined_summary.step_count, params.lwe_dimension);
+        assert_eq!(
+            combined_summary.public_inputs[..2 * params.polynomial_size],
+            statements[0].public_inputs[..2 * params.polynomial_size]
+        );
 
         let mut mismatched_accumulator = statements.clone();
         mismatched_accumulator[1].public_inputs[0] += P3Goldilocks::ONE;
