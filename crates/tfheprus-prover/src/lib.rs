@@ -247,8 +247,8 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use tfheprus_core::{
-        bootstrap_without_keyswitch, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext,
-        Polynomial, SecretKey, TestPolynomial,
+        bootstrap_without_keyswitch, EvaluationKey, GgswCiphertext, GlweCiphertext, Goldilocks,
+        LweCiphertext, Polynomial, SecretKey, TestPolynomial,
     };
 
     use super::*;
@@ -376,5 +376,25 @@ mod tests {
             verify_trivial_pbs_proof(&other_instance, &proof),
             Err(ProofError::StatementMismatch)
         );
+    }
+
+    #[test]
+    fn proves_and_verifies_paper_v1_trivial_mask_pbs() {
+        let params = Params::paper_v1();
+        let input_message = 1;
+        let output_message = 3;
+        let input = LweCiphertext {
+            mask: vec![Goldilocks::ZERO; params.lwe_dimension],
+            body: tfheprus_core::encode_message(&params, input_message),
+        };
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let ek = EvaluationKey {
+            bootstrapping_key: vec![GgswCiphertext { rows: vec![] }; params.lwe_dimension],
+        };
+        let native_output = bootstrap_without_keyswitch(&params, &ek, &input, &test_polynomial);
+        let instance = TrivialPbsInstance::new(params, input, test_polynomial);
+
+        assert_eq!(instance.output, native_output);
+        prove_and_verify_trivial_pbs(&instance).unwrap();
     }
 }

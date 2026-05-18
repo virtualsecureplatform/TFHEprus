@@ -45,7 +45,15 @@ cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run -p tfheprus-cli -- prove-trivial-pbs
+cargo run -p tfheprus-cli -- prove-paper-pbs
 ```
+
+`prove-paper-pbs` uses `Params::paper_v1()` and reports measured prove/verify
+times. The reference paper reports 18 minutes prover time and 8 ms verifier time
+on an Hpc7a.96xlarge for its full PBS implementation. This command is the
+current trivial-mask PBS PoC at the same parameter shape; on the current runner,
+`cargo run --release -p tfheprus-cli -- prove-paper-pbs` completed with
+`prove_ms=125` and `verify_ms=6`.
 
 ## Validation
 

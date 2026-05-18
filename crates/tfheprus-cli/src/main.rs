@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::time::Instant;
 
 use tfheprus_circuits::{
     MulXaiInstance, PolyMulInstance, SampleExtractInstance, TrivialPbsInstance,
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-mul-xai") => prove_mul_xai_demo()?,
         Some("prove-sample-extract") => prove_sample_extract_demo()?,
         Some("prove-trivial-pbs") => prove_trivial_pbs_demo()?,
+        Some("prove-paper-pbs") => prove_paper_pbs_demo()?,
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -103,7 +105,14 @@ fn prove_sample_extract_demo() -> Result<(), Box<dyn Error>> {
 }
 
 fn prove_trivial_pbs_demo() -> Result<(), Box<dyn Error>> {
-    let params = Params::toy();
+    prove_pbs_demo("trivial-pbs", Params::toy())
+}
+
+fn prove_paper_pbs_demo() -> Result<(), Box<dyn Error>> {
+    prove_pbs_demo("paper-pbs", Params::paper_v1())
+}
+
+fn prove_pbs_demo(label: &str, params: Params) -> Result<(), Box<dyn Error>> {
     let input_message = 1;
     let output_message = 3;
     let input = LweCiphertext {
@@ -113,16 +122,26 @@ fn prove_trivial_pbs_demo() -> Result<(), Box<dyn Error>> {
     let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
     let instance = TrivialPbsInstance::new(params.clone(), input, test_polynomial);
 
+    let prove_started = Instant::now();
     let proof = prove_trivial_pbs(&instance)?;
+    let prove_time = prove_started.elapsed();
+
+    let verify_started = Instant::now();
     verify_trivial_pbs_proof(&instance, &proof)?;
+    let verify_time = verify_started.elapsed();
 
     println!(
-        "trivial-pbs proof verified: lwe_dimension={}, glwe_dimension={}, degree={}, initial_exponent={}, public_inputs={}",
+        "{label} proof verified: lwe_dimension={}, glwe_dimension={}, degree={}, initial_exponent={}, public_inputs={}",
         proof.params.lwe_dimension,
         proof.params.glwe_dimension,
         proof.params.polynomial_size,
         proof.initial_exponent,
         proof.public_inputs.len()
+    );
+    println!(
+        "prove_ms={}, verify_ms={}",
+        prove_time.as_millis(),
+        verify_time.as_millis()
     );
     println!(
         "input_message={}, output_message={}",
@@ -158,6 +177,6 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-trivial-pbs]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-trivial-pbs|prove-paper-pbs]"
     );
 }
