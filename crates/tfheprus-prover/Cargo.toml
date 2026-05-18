@@ -8,11 +8,15 @@ repository.workspace = true
 [dependencies]
 tfheprus-core = { path = "../tfheprus-core" }
 tfheprus-circuits = { path = "../tfheprus-circuits" }
+p3-air.workspace = true
 p3-batch-stark.workspace = true
 p3-circuit.workspace = true
 p3-circuit-prover.workspace = true
 p3-field.workspace = true
 p3-goldilocks.workspace = true
+p3-lookup.workspace = true
+p3-matrix.workspace = true
+p3-uni-stark.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

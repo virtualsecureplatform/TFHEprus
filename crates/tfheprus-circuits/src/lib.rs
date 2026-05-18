@@ -1,9 +1,12 @@
 //! Plonky3 circuit mirrors for `tfheprus-core`.
 
+pub mod range_check;
+
 use p3_circuit::circuit::Circuit;
 use p3_circuit::{CircuitBuilder, ExprId};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as P3Goldilocks;
+use range_check::{range_check_expr, register_range_check_npo};
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
     bootstrap_without_keyswitch, decompose_polynomial, mod_switch_to_exponent, negacyclic_ntt,
@@ -326,6 +329,7 @@ pub fn build_actual_pbs_circuit(
     );
 
     let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     let input_mask = builder.alloc_public_inputs(instance.params.lwe_dimension, "actual_pbs_mask");
     let input_body = builder.alloc_public_inputs(1, "actual_pbs_body");
     let test_poly =
@@ -417,10 +421,6 @@ fn append_decomposition_private_inputs(
         for digit_poly in &digits {
             let digit = digit_poly[coeff_index];
             inputs.push(core_to_p3(digit));
-            for bit_index in 0..params.decomposition_base_log {
-                let bit = (digit.value() >> bit_index) & 1;
-                inputs.push(P3Goldilocks::from_u64(bit));
-            }
         }
     }
 }
@@ -540,9 +540,7 @@ fn decompose_poly_expr(
         let mut reconstructed = zero;
         for (level_index, level) in levels.iter_mut().enumerate() {
             let digit = builder.alloc_private_input("decomp_digit");
-            let digit_from_bits =
-                constrain_digit_bits(builder, digit, params.decomposition_base_log);
-            builder.connect(digit, digit_from_bits);
+            range_check_expr(builder, digit, params.decomposition_base_log);
             let scale = Goldilocks::from_u64(1u64 << (params.decomposition_base_log * level_index));
             let scale_const = builder.define_const(core_to_p3(scale));
             let scaled_digit = builder.mul(digit, scale_const);
@@ -552,23 +550,6 @@ fn decompose_poly_expr(
         builder.connect(coeff, reconstructed);
     }
     levels
-}
-
-fn constrain_digit_bits(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    _digit: ExprId,
-    bit_count: usize,
-) -> ExprId {
-    let mut reconstructed = builder.define_const(P3Goldilocks::ZERO);
-    for bit_index in 0..bit_count {
-        let bit = builder.alloc_private_input("decomp_bit");
-        builder.assert_bool(bit);
-        let scale = Goldilocks::from_u64(1u64 << bit_index);
-        let scale_const = builder.define_const(core_to_p3(scale));
-        let scaled_bit = builder.mul(bit, scale_const);
-        reconstructed = builder.add(reconstructed, scaled_bit);
-    }
-    reconstructed
 }
 
 fn mod_switch_exponent_bits_expr(

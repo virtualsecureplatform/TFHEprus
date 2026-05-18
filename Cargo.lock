@@ -830,11 +830,15 @@ dependencies = [
 name = "tfheprus-prover"
 version = "0.1.0"
 dependencies = [
+ "p3-air",
  "p3-batch-stark",
  "p3-circuit",
  "p3-circuit-prover",
  "p3-field",
  "p3-goldilocks",
+ "p3-lookup",
+ "p3-matrix",
+ "p3-uni-stark",
  "rand 0.8.6",
  "rand_chacha",
  "tfheprus-circuits",

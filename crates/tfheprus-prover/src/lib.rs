@@ -1,5 +1,7 @@
 //! Plonky3-backed prove/verify proof-of-concept entry points.
 
+mod range_check;
+
 use core::fmt;
 
 use p3_batch_stark::ProverData;
@@ -10,6 +12,10 @@ use p3_circuit_prover::{
     BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, TablePacking,
 };
 use p3_goldilocks::Goldilocks as P3Goldilocks;
+use range_check::{
+    proof_range_check_bit_counts, range_check_bit_counts, RangeCheckAirBuilder,
+    RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
+};
 use tfheprus_circuits::{
     build_actual_pbs_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
     build_sample_extract_circuit, ActualPbsInstance, MulXaiInstance, PolyMulInstance,
@@ -207,12 +213,15 @@ fn prove_circuit(
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
     let config = config::goldilocks();
     let table_packing = TablePacking::default();
+    let range_bit_counts = range_check_bit_counts(circuit);
+    let range_preprocessors = range_preprocessors(&range_bit_counts);
+    let range_air_builders = range_air_builders(&range_bit_counts);
     let (airs_degrees, primitive_columns, non_primitive_columns) =
         get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
             circuit,
             &table_packing,
-            &[],
-            &[],
+            &range_preprocessors,
+            &range_air_builders,
             ConstraintProfile::Standard,
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
@@ -232,7 +241,8 @@ fn prove_circuit(
         .run()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
-    let prover = BatchStarkProver::new(config).with_table_packing(table_packing);
+    let mut prover = BatchStarkProver::new(config).with_table_packing(table_packing);
+    register_range_check_provers(&mut prover, &range_bit_counts);
     prover
         .prove_all_tables(&traces, &circuit_prover_data)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
@@ -240,10 +250,48 @@ fn prove_circuit(
 
 fn verify_circuit_proof(proof: &BatchStarkProof<GoldilocksConfig>) -> Result<(), ProofError> {
     let config = config::goldilocks();
-    let prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
+    let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
+    let range_bit_counts = proof_range_check_bit_counts(proof);
+    register_range_check_provers(&mut prover, &range_bit_counts);
     prover
         .verify_all_tables(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+}
+
+fn range_preprocessors(
+    bit_counts: &[usize],
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoPreprocessor<P3Goldilocks>>> {
+    if bit_counts.is_empty() {
+        Vec::new()
+    } else {
+        vec![Box::new(RangeCheckPreprocessor)]
+    }
+}
+
+fn range_air_builders(
+    bit_counts: &[usize],
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>> {
+    bit_counts
+        .iter()
+        .map(|&bit_count| {
+            Box::new(RangeCheckAirBuilder::new(
+                bit_count,
+                RANGE_CHECK_DEFAULT_LANES,
+            )) as Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>
+        })
+        .collect()
+}
+
+fn register_range_check_provers(
+    prover: &mut BatchStarkProver<GoldilocksConfig>,
+    bit_counts: &[usize],
+) {
+    for &bit_count in bit_counts {
+        prover.register_table_prover(Box::new(RangeCheckProver::new(
+            bit_count,
+            RANGE_CHECK_DEFAULT_LANES,
+        )));
+    }
 }
 
 #[cfg(test)]
