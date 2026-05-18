@@ -142,6 +142,63 @@ pub struct ActualPbsInstance {
     pub mask_exponents: Vec<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsStepInstance {
+    pub params: Params,
+    pub mask_value: Goldilocks,
+    pub input_accumulator: GlweCiphertext,
+    pub selector: GgswCiphertext,
+    pub output_accumulator: GlweCiphertext,
+    pub exponent: usize,
+}
+
+impl ActualPbsStepInstance {
+    pub fn new(
+        params: Params,
+        mask_value: Goldilocks,
+        input_accumulator: GlweCiphertext,
+        selector: GgswCiphertext,
+    ) -> Self {
+        assert_eq!(input_accumulator.mask.len(), params.glwe_dimension);
+        assert_eq!(input_accumulator.body.len(), params.polynomial_size);
+        assert_eq!(selector.rows.len(), params.glwe_dimension + 1);
+
+        let exponent = mod_switch_to_exponent(&params, mask_value);
+        let rotated = input_accumulator.mul_xai(exponent);
+        let output_accumulator = cmux(&params, &input_accumulator, &rotated, &selector);
+
+        Self {
+            params,
+            mask_value,
+            input_accumulator,
+            selector,
+            output_accumulator,
+            exponent,
+        }
+    }
+
+    pub fn public_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        inputs.push(core_to_p3(self.mask_value));
+        append_glwe_public_inputs(&mut inputs, &self.input_accumulator);
+        append_ggsw_ntt_public_inputs(&mut inputs, &self.selector);
+        append_glwe_public_inputs(&mut inputs, &self.output_accumulator);
+        inputs
+    }
+
+    pub fn private_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        append_torus_decomposition_private_inputs(self.mask_value, &mut inputs);
+        let rotated = self.input_accumulator.mul_xai(self.exponent);
+        let diff = rotated.sub(&self.input_accumulator);
+        for poly in &diff.mask {
+            append_decomposition_private_inputs(&self.params, poly, &mut inputs);
+        }
+        append_decomposition_private_inputs(&self.params, &diff.body, &mut inputs);
+        inputs
+    }
+}
+
 impl ActualPbsInstance {
     pub fn new(
         params: Params,
@@ -432,12 +489,55 @@ pub fn build_actual_pbs_circuit(
     Ok(builder.build()?)
 }
 
+pub fn build_actual_pbs_step_circuit(
+    instance: &ActualPbsStepInstance,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert!(instance.params.polynomial_size > 0);
+    assert!(instance.params.polynomial_size.is_power_of_two());
+    assert!(instance.params.glwe_dimension > 0);
+
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
+    if let Some(error_bits) = decomposition_error_bits(&instance.params) {
+        register_range_check_npo(&mut builder, error_bits);
+    }
+
+    let mask_value = builder.alloc_public_inputs(1, "actual_pbs_step_mask");
+    let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+    let selector = alloc_public_ggsw_ntt(&mut builder, &instance.params);
+    let output_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+
+    let exponent_bits = mod_switch_exponent_bits_expr(
+        &mut builder,
+        mask_value[0],
+        instance.params.exponent_modulus(),
+    );
+    let rotated = glwe_mul_xai_by_bits_expr(&mut builder, &input_accumulator, &exponent_bits);
+    let computed = cmux_expr(
+        &mut builder,
+        &instance.params,
+        &input_accumulator,
+        &rotated,
+        &selector,
+    );
+    connect_glwe(&mut builder, &computed, &output_accumulator);
+
+    Ok(builder.build()?)
+}
+
 pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
 
 fn append_polynomial_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
     inputs.extend(poly.coeffs().iter().copied().map(core_to_p3));
+}
+
+fn append_glwe_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlweCiphertext) {
+    for poly in &ct.mask {
+        append_polynomial_public_inputs(inputs, poly);
+    }
+    append_polynomial_public_inputs(inputs, &ct.body);
 }
 
 fn append_polynomial_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
@@ -549,6 +649,14 @@ fn alloc_public_ggsw_ntt(
     GgswNttExpr { rows }
 }
 
+fn alloc_public_glwe(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlweExpr {
+    let mask = (0..params.glwe_dimension)
+        .map(|_| builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_mask"))
+        .collect();
+    let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body");
+    GlweExpr { mask, body }
+}
+
 fn alloc_public_glev_ntt(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
@@ -586,6 +694,21 @@ fn connect_sample_extract(
         }
     }
     builder.connect(ct.body[0], output_body);
+}
+
+fn connect_glwe(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    actual: &GlweExpr,
+    expected: &GlweExpr,
+) {
+    for (actual_poly, expected_poly) in actual.mask.iter().zip(expected.mask.iter()) {
+        for (&actual_coeff, &expected_coeff) in actual_poly.iter().zip(expected_poly.iter()) {
+            builder.connect(actual_coeff, expected_coeff);
+        }
+    }
+    for (&actual_coeff, &expected_coeff) in actual.body.iter().zip(expected.body.iter()) {
+        builder.connect(actual_coeff, expected_coeff);
+    }
 }
 
 fn cmux_expr(
@@ -1132,6 +1255,29 @@ mod tests {
     fn actual_pbs_circuit_runs_with_approximate_decomposition() {
         let params = Params::new(1, 4, 1, 5, 4, 4);
         run_actual_pbs_circuit_with_params(params);
+    }
+
+    #[test]
+    fn actual_pbs_step_circuit_runs_with_approximate_decomposition() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let input_accumulator = GlweCiphertext::trivial(
+            Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]),
+            params.glwe_dimension,
+        );
+        let mask_step = tfheprus_core::GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let instance = ActualPbsStepInstance::new(
+            params,
+            Goldilocks::from_u64(mask_step),
+            input_accumulator,
+            zero_ggsw(&Params::new(1, 4, 1, 5, 4, 4)),
+        );
+        let circuit = build_actual_pbs_step_circuit(&instance).unwrap();
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner
+            .set_private_inputs(&instance.private_inputs())
+            .unwrap();
+        runner.run().unwrap();
     }
 
     fn run_actual_pbs_circuit_with_params(params: Params) {

@@ -17,9 +17,9 @@ use range_check::{
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use tfheprus_circuits::{
-    build_actual_pbs_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
-    build_sample_extract_circuit, ActualPbsInstance, MulXaiInstance, PolyMulInstance,
-    SampleExtractInstance,
+    build_actual_pbs_circuit, build_actual_pbs_step_circuit, build_mul_xai_circuit,
+    build_poly_mul_circuit, build_sample_extract_circuit, ActualPbsInstance, ActualPbsStepInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::Params;
 
@@ -51,6 +51,13 @@ pub struct ActualPbsProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+pub struct ActualPbsStepProof {
+    pub params: Params,
+    pub exponent: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofError {
     StatementMismatch,
@@ -72,6 +79,7 @@ pub type PolyMulProofError = ProofError;
 pub type MulXaiProofError = ProofError;
 pub type SampleExtractProofError = ProofError;
 pub type ActualPbsProofError = ProofError;
+pub type ActualPbsStepProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -206,6 +214,44 @@ pub fn prove_and_verify_actual_pbs(instance: &ActualPbsInstance) -> Result<(), P
     verify_actual_pbs_proof(instance, &proof)
 }
 
+pub fn prove_actual_pbs_step(
+    instance: &ActualPbsStepInstance,
+) -> Result<ActualPbsStepProof, ProofError> {
+    let circuit = build_actual_pbs_step_circuit(instance)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.public_inputs();
+    let private_inputs = instance.private_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs, &private_inputs)?;
+
+    Ok(ActualPbsStepProof {
+        params: instance.params.clone(),
+        exponent: instance.exponent,
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn verify_actual_pbs_step_proof(
+    instance: &ActualPbsStepInstance,
+    proof: &ActualPbsStepProof,
+) -> Result<(), ProofError> {
+    if proof.params != instance.params
+        || proof.exponent != instance.exponent
+        || proof.public_inputs != instance.public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof)
+}
+
+pub fn prove_and_verify_actual_pbs_step(
+    instance: &ActualPbsStepInstance,
+) -> Result<(), ProofError> {
+    let proof = prove_actual_pbs_step(instance)?;
+    verify_actual_pbs_step_proof(instance, &proof)
+}
+
 fn prove_circuit(
     circuit: &Circuit<P3Goldilocks>,
     public_inputs: &[P3Goldilocks],
@@ -299,8 +345,8 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use tfheprus_core::{
-        bootstrap_without_keyswitch, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext,
-        Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
+        bootstrap_without_keyswitch, mod_switch_to_exponent, EvaluationKey, GlweCiphertext,
+        Goldilocks, LweCiphertext, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
     };
 
     use super::*;
@@ -401,6 +447,13 @@ mod tests {
         proves_and_verifies_actual_pbs_with_params(params);
     }
 
+    #[test]
+    fn proves_and_verifies_actual_pbs_step_with_approximate_decomposition() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let instance = actual_pbs_step_instance_with_params(params);
+        prove_and_verify_actual_pbs_step(&instance).unwrap();
+    }
+
     fn proves_and_verifies_actual_pbs_with_params(params: Params) {
         let mut rng = ChaCha20Rng::seed_from_u64(101);
         let sk = SecretKey::generate(&params, &mut rng);
@@ -425,6 +478,34 @@ mod tests {
             output_message
         );
         prove_and_verify_actual_pbs(&instance).unwrap();
+    }
+
+    fn actual_pbs_step_instance_with_params(params: Params) -> ActualPbsStepInstance {
+        let mut rng = ChaCha20Rng::seed_from_u64(103);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let input_accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+
+        ActualPbsStepInstance::new(
+            params,
+            input.mask[0],
+            input_accumulator,
+            ek.bootstrapping_key[0].clone(),
+        )
     }
 
     #[test]

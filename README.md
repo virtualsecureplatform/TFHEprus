@@ -41,6 +41,8 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   path. This includes `mul_xai`, CMUX, GGSW external product, exact gadget
   decomposition, paper-style approximate gadget decomposition with bounded
   reconstruction error, table-backed range checks, and sample extraction.
+- Plonky3 PBS-step PoC for a single blind-rotation CMUX iteration. This is the
+  current leaf circuit for the recursive/chunked PBS direction.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -54,6 +56,7 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
+cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -98,6 +101,13 @@ reference run and completed the NTT-key native PBS with
 `native_ntt_us=842314`, decrypting the output message as expected. The
 paper-v1 proof command remains disabled until the monolithic PBS circuit is
 split into recursive/chunked proofs.
+
+The single-step proof is available at paper shape. On the current runner,
+`cargo run --release -p tfheprus-cli -- prove-pbs-step paper-v1` verified one
+blind-rotation CMUX step with `public_inputs=20481`, `prove_us=11879152`, and
+`verify_us=18639`. This is not yet a full recursive PBS proof; it is the leaf
+proof needed before adding recursive verification and hash-chain binding across
+all 728 steps.
 
 ## Validation
 
