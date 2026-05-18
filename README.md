@@ -20,7 +20,8 @@ enough to mirror in Plonky3 circuits.
 - Negacyclic polynomial arithmetic in `F_q[X] / (X^N + 1)`, including a
   twisted Goldilocks NTT path.
 - LWE and GLWE encryption/decryption with zero-noise semantics for now.
-- GLev/GGSW structures for exact toy decomposition.
+- GLev/GGSW structures for exact toy decomposition and native paper-style
+  approximate decomposition (`B=2^5, l=4` in `Params::paper_v1()`).
 - External product and CMUX, with coefficient-key and NTT-key variants.
 - Blind rotation and `bootstrap_without_keyswitch`, including an
   NTT-domain bootstrapping-key path.
@@ -67,7 +68,7 @@ run-actual-pbs-native` completed the coefficient-key PBS in
 `native_coeff_us=750`, converted the bootstrapping key to NTT form in
 `key_ntt_precompute_us=194`, and completed the online NTT-key PBS in
 `native_ntt_us=467`. `cargo run --release -p tfheprus-cli --
-prove-actual-pbs` completed with `prove_us=439828` and `verify_us=10068`.
+prove-actual-pbs` completed with `prove_us=434979` and `verify_us=10074`.
 These are still `Params::toy()` timings; at degree 8, NTT overhead dominates
 the native run, while the proof circuit already benefits from removing the
 key-side transform.
