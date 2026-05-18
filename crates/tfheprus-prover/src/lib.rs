@@ -117,6 +117,12 @@ pub struct RecursiveActualPbsChainChunkProof {
     pub recursion: recursive::RecursiveBatchProof,
 }
 
+pub struct AggregatedRecursiveActualPbsChainChunkPairProof {
+    pub left: RecursiveActualPbsChainChunkProof,
+    pub right: RecursiveActualPbsChainChunkProof,
+    pub aggregation: recursive::AggregatedRecursiveBatchProof,
+}
+
 impl ActualPbsChainChunkProof {
     pub fn public_statement(&self) -> ActualPbsChainChunkStatement {
         ActualPbsChainChunkStatement {
@@ -488,6 +494,34 @@ pub fn prove_and_verify_recursive_actual_pbs_chain_chunk(
 ) -> Result<(), ProofError> {
     let proof = prove_recursive_actual_pbs_chain_chunk(instance)?;
     verify_recursive_actual_pbs_chain_chunk_proof(instance, &proof)
+}
+
+pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_pair(
+    left: RecursiveActualPbsChainChunkProof,
+    right: RecursiveActualPbsChainChunkProof,
+) -> Result<AggregatedRecursiveActualPbsChainChunkPairProof, ProofError> {
+    let aggregation =
+        recursive::prove_aggregate_recursive_batches(&left.recursion, &right.recursion)?;
+
+    Ok(AggregatedRecursiveActualPbsChainChunkPairProof {
+        left,
+        right,
+        aggregation,
+    })
+}
+
+pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
+    left_statement: &ActualPbsChainChunkStatement,
+    right_statement: &ActualPbsChainChunkStatement,
+    proof: &AggregatedRecursiveActualPbsChainChunkPairProof,
+) -> Result<(), ProofError> {
+    verify_recursive_actual_pbs_chain_chunk_statement_proof(left_statement, &proof.left)?;
+    verify_recursive_actual_pbs_chain_chunk_statement_proof(right_statement, &proof.right)?;
+    recursive::verify_aggregated_recursive_batch_for_children(
+        &proof.left.recursion,
+        &proof.right.recursion,
+        &proof.aggregation,
+    )
 }
 
 fn prove_circuit(

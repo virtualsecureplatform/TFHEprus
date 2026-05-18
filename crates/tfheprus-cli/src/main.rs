@@ -16,13 +16,15 @@ use tfheprus_core::{
 };
 use tfheprus_prover::{
     prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
-    prove_actual_pbs_step_chain, prove_actual_pbs_step_private, prove_mul_xai, prove_poly_mul,
+    prove_actual_pbs_step_chain, prove_actual_pbs_step_private,
+    prove_aggregated_recursive_actual_pbs_chain_chunk_pair, prove_mul_xai, prove_poly_mul,
     prove_recursive_actual_pbs_chain_chunk, prove_sample_extract,
     verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
     verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
-    verify_actual_pbs_step_proof, verify_mul_xai_proof, verify_poly_mul_proof,
-    verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
-    ActualPbsChainChunkStatement,
+    verify_actual_pbs_step_proof,
+    verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof, verify_mul_xai_proof,
+    verify_poly_mul_proof, verify_recursive_actual_pbs_chain_chunk_statement_proof,
+    verify_sample_extract_proof, ActualPbsChainChunkStatement,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -49,6 +51,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             parse_chunk_step_count_arg(&args)?,
             parse_optional_total_step_count_arg(&args)?,
         )?,
+        Some("prove-pbs-chain-pair-aggregate-recursive") => {
+            prove_pbs_chain_pair_aggregate_recursive_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+            )?
+        }
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
@@ -489,6 +497,101 @@ fn prove_pbs_chain_prefix_recursive_demo(
     Ok(())
 }
 
+fn prove_pbs_chain_pair_aggregate_recursive_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    if chunk_step_count >= params.lwe_dimension {
+        return Err(format!(
+            "chunk step count must leave room for a second chunk, got {chunk_step_count} for n={}",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    let (params, _sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let input_accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let left_end = chunk_step_count;
+    let right_end = (chunk_step_count * 2).min(params.lwe_dimension);
+
+    let left_instance = ActualPbsChainChunkInstance::new(
+        params.clone(),
+        input.mask[..left_end].to_vec(),
+        input_accumulator,
+        evaluation_key.bootstrapping_key[..left_end].to_vec(),
+        pbs_bsk_digest_initial(),
+        pbs_mask_digest_initial(),
+    );
+    let left_statement = ActualPbsChainChunkStatement::from_instance(&left_instance);
+
+    let left_started = Instant::now();
+    let left_proof = prove_recursive_actual_pbs_chain_chunk(&left_instance)?;
+    let left_time = left_started.elapsed();
+
+    let right_instance = ActualPbsChainChunkInstance::new(
+        params.clone(),
+        input.mask[left_end..right_end].to_vec(),
+        left_instance.output_accumulator.clone(),
+        evaluation_key.bootstrapping_key[left_end..right_end].to_vec(),
+        left_instance.bsk_digest_out,
+        left_instance.mask_digest_out,
+    );
+    let right_statement = ActualPbsChainChunkStatement::from_instance(&right_instance);
+
+    let right_started = Instant::now();
+    let right_proof = prove_recursive_actual_pbs_chain_chunk(&right_instance)?;
+    let right_time = right_started.elapsed();
+
+    let aggregate_started = Instant::now();
+    let proof = prove_aggregated_recursive_actual_pbs_chain_chunk_pair(left_proof, right_proof)?;
+    let aggregate_time = aggregate_started.elapsed();
+
+    let verify_started = Instant::now();
+    verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
+        &left_statement,
+        &right_statement,
+        &proof,
+    )?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "pbs-chain-pair aggregate recursive proof verified: preset={}, chunk_steps={}, covered_steps=0..{}, left_recursive_inputs={}, right_recursive_inputs={}, aggregate_tables={}, aggregate_public_inputs={}",
+        preset.name(),
+        chunk_step_count,
+        right_end,
+        proof.left.recursion.public_input_count(),
+        proof.right.recursion.public_input_count(),
+        proof.aggregation.table_count(),
+        proof.aggregation.public_input_count()
+    );
+    println!(
+        "left_prove_ms={}, left_prove_us={}, right_prove_ms={}, right_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}",
+        left_time.as_millis(),
+        left_time.as_micros(),
+        right_time.as_millis(),
+        right_time.as_micros(),
+        aggregate_time.as_millis(),
+        aggregate_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
+    );
+    println!(
+        "left_base_private_inputs={}, right_base_private_inputs={}, output_body0={}, params_n={}",
+        left_instance.private_inputs().len(),
+        right_instance.private_inputs().len(),
+        right_instance.output_accumulator.body[0].value(),
+        params.lwe_dimension
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -684,7 +787,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
