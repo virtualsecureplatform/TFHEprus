@@ -1,14 +1,15 @@
 use std::env;
 use std::error::Error;
 
-use tfheprus_circuits::PolyMulInstance;
+use tfheprus_circuits::{MulXaiInstance, PolyMulInstance};
 use tfheprus_core::{Goldilocks, Params, Polynomial};
-use tfheprus_prover::{prove_poly_mul, verify_poly_mul_proof};
+use tfheprus_prover::{prove_mul_xai, prove_poly_mul, verify_mul_xai_proof, verify_poly_mul_proof};
 
 fn main() -> Result<(), Box<dyn Error>> {
     match env::args().nth(1).as_deref() {
         None | Some("params") => print_params(),
         Some("prove-poly-mul") => prove_poly_mul_demo()?,
+        Some("prove-mul-xai") => prove_mul_xai_demo()?,
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -50,6 +51,25 @@ fn prove_poly_mul_demo() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn prove_mul_xai_demo() -> Result<(), Box<dyn Error>> {
+    let input = polynomial(&[1, 2, 3, 4]);
+    let exponent = 5;
+    let instance = MulXaiInstance::new(input, exponent);
+
+    let proof = prove_mul_xai(&instance)?;
+    verify_mul_xai_proof(&instance, &proof)?;
+
+    println!(
+        "mul_xai proof verified: degree={}, exponent={}, public_inputs={}",
+        proof.degree,
+        proof.exponent,
+        proof.public_inputs.len()
+    );
+    println!("output={}", format_polynomial(&instance.output));
+
+    Ok(())
+}
+
 fn polynomial(coeffs: &[u64]) -> Polynomial {
     Polynomial::from_coeffs(coeffs.iter().copied().map(Goldilocks::from_u64).collect())
 }
@@ -65,5 +85,5 @@ fn format_polynomial(poly: &Polynomial) -> String {
 }
 
 fn print_help() {
-    println!("Usage: tfheprus [params|prove-poly-mul]");
+    println!("Usage: tfheprus [params|prove-poly-mul|prove-mul-xai]");
 }

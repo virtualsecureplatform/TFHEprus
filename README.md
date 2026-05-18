@@ -31,11 +31,14 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 
 - Plonky3 circuit for public negacyclic polynomial multiplication over
   Goldilocks.
-- Batch STARK prove/verify wrapper for the polynomial multiplication circuit.
+- Plonky3 circuit for public `mul_xai`, the negacyclic monomial rotation used
+  by blind rotation.
+- Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
 ```bash
 cargo run -p tfheprus-cli -- prove-poly-mul
+cargo run -p tfheprus-cli -- prove-mul-xai
 ```
 
 ## Validation
