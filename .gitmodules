@@ -1,0 +1,3 @@
+[submodule "thirdparties/Plonky3-recursion"]
+	path = thirdparties/Plonky3-recursion
+	url = https://github.com/Plonky3/Plonky3-recursion.git
