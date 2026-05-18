@@ -16,10 +16,11 @@ use tfheprus_core::{
 use tfheprus_prover::{
     prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
     prove_actual_pbs_step_chain, prove_actual_pbs_step_private, prove_mul_xai, prove_poly_mul,
-    prove_sample_extract, verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
+    prove_recursive_actual_pbs_chain_chunk, prove_sample_extract,
+    verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
     verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
     verify_actual_pbs_step_proof, verify_mul_xai_proof, verify_poly_mul_proof,
-    verify_sample_extract_proof,
+    verify_recursive_actual_pbs_chain_chunk_proof, verify_sample_extract_proof,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -34,6 +35,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-pbs-step-private") => prove_pbs_step_private_demo(parse_preset_arg(&args)?)?,
         Some("prove-pbs-step-chain") => prove_pbs_step_chain_demo(parse_preset_arg(&args)?)?,
         Some("prove-pbs-chain-chunk") => prove_pbs_chain_chunk_demo(
+            parse_preset_arg(&args)?,
+            parse_chunk_step_count_arg(&args)?,
+        )?,
+        Some("prove-pbs-chain-chunk-recursive") => prove_pbs_chain_chunk_recursive_demo(
             parse_preset_arg(&args)?,
             parse_chunk_step_count_arg(&args)?,
         )?,
@@ -327,6 +332,45 @@ fn prove_pbs_chain_chunk_demo(
     Ok(())
 }
 
+fn prove_pbs_chain_chunk_recursive_demo(
+    preset: ParamPreset,
+    step_count: usize,
+) -> Result<(), Box<dyn Error>> {
+    let (params, instance) = actual_pbs_chain_chunk_instance(preset.params(), step_count)?;
+
+    let prove_started = Instant::now();
+    let proof = prove_recursive_actual_pbs_chain_chunk(&instance)?;
+    let prove_time = prove_started.elapsed();
+
+    let verify_started = Instant::now();
+    verify_recursive_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "pbs-chain-chunk recursive proof verified: preset={}, steps={}, recursive_tables={}, recursive_public_inputs={}",
+        preset.name(),
+        proof.base.step_count,
+        proof.recursion.table_count(),
+        proof.recursion.public_input_count()
+    );
+    println!(
+        "prove_ms={}, prove_us={}, verify_ms={}, verify_us={}",
+        prove_time.as_millis(),
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
+    );
+    println!(
+        "base_public_inputs={}, base_private_inputs={}, output_body0={}, params_n={}",
+        proof.base.public_inputs.len(),
+        instance.private_inputs().len(),
+        instance.output_accumulator.body[0].value(),
+        params.lwe_dimension
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -522,7 +566,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 

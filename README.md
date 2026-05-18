@@ -54,6 +54,10 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 chained PBS chunk PoC. Multiple consecutive blind-rotation steps can
   be composed inside one proof with only the chunk input/output accumulator and
   digest endpoints public.
+- Plonky3 recursive verifier PoC for a chained PBS chunk proof. This proves and
+  verifies the verifier for a real private-mask/private-selector PBS chunk
+  proof, using a TFHEprus-local Goldilocks STARK config with Merkle cap height
+  zero while the capped recursive MMCS path is hardened.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -74,6 +78,7 @@ cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-chain-chunk paper-v1 2
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-chunk-recursive toy 1
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -148,6 +153,21 @@ steps while keeping only the chunk endpoints public. On the current runner,
 `cargo run --release -p tfheprus-cli -- prove-pbs-chain-chunk paper-v1 2`
 verified two paper-shaped steps with `public_inputs=4112`,
 `private_inputs=57474`, `prove_us=47030295`, and `verify_us=19652`.
+
+The recursive verifier path is live for the chained chunk statement:
+`cargo run --release -p tfheprus-cli -- prove-pbs-chain-chunk-recursive toy 1`
+proved and verified the recursive verifier for one actual PBS chunk step with
+`base_public_inputs=48`, `base_private_inputs=257`,
+`recursive_public_inputs=107`, `prove_us=5994080`, and `verify_us=93789`.
+This is the first end-to-end prove/verify recursion smoke for the real PBS leaf,
+but not yet a paper-v1 recursive run.
+
+Remaining gap to paper-param PBS: run recursion on paper-shaped chunk proofs,
+choose practical chunk sizes and aggregation depth for all 728 blind-rotation
+steps, replace the current PoC digest with the final paper-style hash/commitment
+chain, harden recursive MMCS verification for capped Merkle commitments, and
+add the final TFHE key-switch if the target statement needs ciphertexts under
+the original output LWE key.
 
 ## Validation
 

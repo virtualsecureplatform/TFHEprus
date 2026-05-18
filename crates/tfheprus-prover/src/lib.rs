@@ -1,18 +1,28 @@
 //! Plonky3-backed prove/verify proof-of-concept entry points.
 
 mod range_check;
+mod recursive;
 
 use core::fmt;
 
 use p3_batch_stark::ProverData;
+use p3_challenger::DuplexChallenger;
 use p3_circuit::circuit::Circuit;
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
-use p3_circuit_prover::config::{self, GoldilocksConfig};
+use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
     BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, PrimitiveTable,
     TablePacking, NUM_PRIMITIVE_TABLES,
 };
-use p3_goldilocks::Goldilocks as P3Goldilocks;
+use p3_commit::ExtensionMmcs;
+use p3_dft::Radix2DitParallel;
+use p3_field::extension::BinomialExtensionField;
+use p3_fri::{FriParameters, TwoAdicFriPcs};
+use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
+use p3_merkle_tree::MerkleTreeMmcs;
+use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_uni_stark::StarkConfig;
+use rand_p3::SeedableRng;
 use range_check::{
     proof_range_check_bit_counts, range_check_bit_counts, RangeCheckAirBuilder,
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
@@ -84,6 +94,11 @@ pub struct ActualPbsChainChunkProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+pub struct RecursiveActualPbsChainChunkProof {
+    pub base: ActualPbsChainChunkProof,
+    pub recursion: recursive::RecursiveBatchProof,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofError {
     StatementMismatch,
@@ -109,6 +124,7 @@ pub type ActualPbsStepProofError = ProofError;
 pub type ActualPbsStepPrivateProofError = ProofError;
 pub type ActualPbsStepChainProofError = ProofError;
 pub type ActualPbsChainChunkProofError = ProofError;
+pub type RecursiveActualPbsChainChunkProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -397,12 +413,36 @@ pub fn prove_and_verify_actual_pbs_chain_chunk(
     verify_actual_pbs_chain_chunk_proof(instance, &proof)
 }
 
+pub fn prove_recursive_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<RecursiveActualPbsChainChunkProof, ProofError> {
+    let base = prove_actual_pbs_chain_chunk(instance)?;
+    let recursion = recursive::prove_recursive_batch(&base.proof)?;
+
+    Ok(RecursiveActualPbsChainChunkProof { base, recursion })
+}
+
+pub fn verify_recursive_actual_pbs_chain_chunk_proof(
+    instance: &ActualPbsChainChunkInstance,
+    proof: &RecursiveActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    verify_actual_pbs_chain_chunk_proof(instance, &proof.base)?;
+    recursive::verify_recursive_batch_for_base(&proof.base.proof, &proof.recursion)
+}
+
+pub fn prove_and_verify_recursive_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<(), ProofError> {
+    let proof = prove_recursive_actual_pbs_chain_chunk(instance)?;
+    verify_recursive_actual_pbs_chain_chunk_proof(instance, &proof)
+}
+
 fn prove_circuit(
     circuit: &Circuit<P3Goldilocks>,
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
-    let config = config::goldilocks();
+    let config = goldilocks_config();
     let table_packing = TablePacking::default();
     let range_bit_counts = range_check_bit_counts(circuit);
     let range_preprocessors = range_preprocessors(&range_bit_counts);
@@ -452,7 +492,7 @@ fn verify_circuit_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    let config = config::goldilocks();
+    let config = goldilocks_config();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
     register_range_check_provers(&mut prover, &range_bit_counts);
@@ -495,6 +535,30 @@ fn register_range_check_provers(
             RANGE_CHECK_DEFAULT_LANES,
         )));
     }
+}
+
+type P3Challenge = BinomialExtensionField<P3Goldilocks, 2>;
+type P3Hash = PaddingFreeSponge<Poseidon2Goldilocks<8>, 8, 4, 4>;
+type P3Compress = TruncatedPermutation<Poseidon2Goldilocks<8>, 2, 4, 8>;
+type P3Mmcs = MerkleTreeMmcs<P3Goldilocks, P3Goldilocks, P3Hash, P3Compress, 2, 4>;
+
+pub(crate) fn goldilocks_config() -> GoldilocksConfig {
+    let perm = goldilocks_poseidon2_8();
+    let hash = P3Hash::new(perm.clone());
+    let compress = P3Compress::new(perm.clone());
+    let val_mmcs = P3Mmcs::new(hash, compress, 0);
+    let challenge_mmcs = ExtensionMmcs::<P3Goldilocks, P3Challenge, P3Mmcs>::new(val_mmcs.clone());
+    let dft = Radix2DitParallel::default();
+    let fri_params = FriParameters::new_benchmark_high_arity(challenge_mmcs);
+    let pcs = TwoAdicFriPcs::new(dft, val_mmcs, fri_params);
+    let challenger = DuplexChallenger::new(perm);
+
+    StarkConfig::new(pcs, challenger)
+}
+
+pub(crate) fn goldilocks_poseidon2_8() -> Poseidon2Goldilocks<8> {
+    let mut rng = rand_p3::rngs::SmallRng::seed_from_u64(1);
+    Poseidon2Goldilocks::<8>::new_from_rng_128(&mut rng)
 }
 
 #[cfg(test)]
