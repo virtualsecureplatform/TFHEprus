@@ -111,6 +111,7 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaves-recursive toy 2 2 
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 0 target/pbs-checkpoints/toy-leaf-0.bin
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 1 target/pbs-checkpoints/toy-leaf-1.bin
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaves-recursive target/pbs-checkpoints/toy-root.bin target/pbs-checkpoints/toy-leaf-0.bin target/pbs-checkpoints/toy-leaf-1.bin
+cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaf-dir-recursive target/pbs-checkpoints/toy-root-from-dir.bin target/pbs-checkpoints 2
 cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin
 cargo run -p tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728
 cargo run -p tfheprus-cli -- run-actual-pbs-native
@@ -260,10 +261,15 @@ reused both artifacts with `written=0`, `reused=2`, `total_prove_us=0`, and
 `aggregate-pbs-chain-leaves-recursive` produced a one-layer root with
 `root_public_inputs=871`, `chain_summary_fields=55`,
 `aggregate_us=11982676`, `verify_us=478890`, `root_verify_us=14925`, and
-`root_artifact_bytes=906094`. `verify-pbs-chain-root-artifact-recursive`
-verified the resulting root artifact from disk with `verify_us=15470`. The
-deserializer rehydrates lookup metadata that Plonky3 native verification can
-rebuild internally but recursive verifier circuit construction needs explicitly.
+`root_artifact_bytes=906094`. The directory aggregator
+`aggregate-pbs-chain-leaf-dir-recursive` can consume the same checkpoint
+directory either with an explicit leaf count or by scanning sorted `leaf-*.bin`
+files; the explicit-count smoke produced `aggregate_us=11923998`,
+`verify_us=476951`, `root_verify_us=14928`, and `root_artifact_bytes=906094`.
+`verify-pbs-chain-root-artifact-recursive` verified the resulting root artifact
+from disk with `verify_us=15878`. The deserializer rehydrates lookup metadata
+that Plonky3 native verification can rebuild internally but recursive verifier
+circuit construction needs explicitly.
 
 For planning full paper-v1 runs without allocating keys or proving, the tree
 profiler reports the chunk schedule and leaf statement sizes. `cargo run -p
@@ -275,12 +281,10 @@ tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `total_leaf_private_inputs=20920536`.
 
 Remaining gap to paper-param PBS: execute the full 728-step paper-v1 run using
-the checkpoint artifact flow, add a convenience aggregator for checkpoint
-directories so full runs do not need shell-expanded leaf lists, replace the
-current PoC digest with the final paper-style hash/commitment chain, harden
-recursive MMCS verification for capped Merkle commitments, and add the final
-TFHE key-switch if the target statement needs ciphertexts under the original
-output LWE key.
+the checkpoint artifact flow, replace the current PoC digest with the final
+paper-style hash/commitment chain, harden recursive MMCS verification for capped
+Merkle commitments, and add the final TFHE key-switch if the target statement
+needs ciphertexts under the original output LWE key.
 
 ## Validation
 

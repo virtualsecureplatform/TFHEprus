@@ -1,7 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rand::SeedableRng;
@@ -90,6 +90,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             aggregate_pbs_chain_leaf_artifacts_recursive_demo(
                 parse_required_arg(&args, 2, "root artifact output path")?,
                 parse_repeated_args(&args, 3, "leaf artifact paths")?,
+            )?
+        }
+        Some("aggregate-pbs-chain-leaf-dir-recursive") => {
+            aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
+                parse_required_arg(&args, 2, "root artifact output path")?,
+                parse_required_arg(&args, 3, "leaf artifact directory")?,
+                parse_optional_leaf_count_arg(&args)?,
             )?
         }
         Some("verify-pbs-chain-root-artifact-recursive") => {
@@ -1088,6 +1095,15 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
     Ok(())
 }
 
+fn aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
+    output_path: &str,
+    leaf_dir: &str,
+    leaf_count: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let leaf_paths = leaf_artifact_paths_from_dir(leaf_dir, leaf_count)?;
+    aggregate_pbs_chain_leaf_artifacts_recursive_demo(output_path, leaf_paths)
+}
+
 fn verify_pbs_chain_root_artifact_recursive_demo(path: &str) -> Result<(), Box<dyn Error>> {
     let bytes = fs::read(path)?;
     let proof = deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
@@ -1109,6 +1125,55 @@ fn verify_pbs_chain_root_artifact_recursive_demo(path: &str) -> Result<(), Box<d
     );
 
     Ok(())
+}
+
+fn leaf_artifact_paths_from_dir(
+    leaf_dir: &str,
+    leaf_count: Option<usize>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let leaf_dir = Path::new(leaf_dir);
+    let paths = if let Some(leaf_count) = leaf_count {
+        if leaf_count < 2 {
+            return Err("leaf count must be at least 2".into());
+        }
+        let mut paths = Vec::with_capacity(leaf_count);
+        for index in 0..leaf_count {
+            let path = leaf_dir.join(format!("leaf-{index:05}.bin"));
+            if !path.exists() {
+                return Err(format!("missing leaf artifact: {}", path.display()).into());
+            }
+            paths.push(path);
+        }
+        paths
+    } else {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(leaf_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with("leaf-") && file_name.ends_with(".bin") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        if paths.len() < 2 {
+            return Err("at least two leaf artifacts are required".into());
+        }
+        paths
+    };
+
+    paths
+        .into_iter()
+        .map(path_to_string)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn path_to_string(path: PathBuf) -> Result<String, Box<dyn Error>> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|path| format!("non-UTF-8 path is not supported: {path:?}").into())
 }
 
 fn profile_pbs_chain_tree_demo(
@@ -1476,7 +1541,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|verify-pbs-chain-root-artifact-recursive <root_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|verify-pbs-chain-root-artifact-recursive <root_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -1576,6 +1641,19 @@ fn parse_required_chunk_count_arg(args: &[String]) -> Result<usize, Box<dyn Erro
                 return Err("chunk count must be nonzero".into());
             }
             Ok(parsed)
+        }
+    }
+}
+
+fn parse_optional_leaf_count_arg(args: &[String]) -> Result<Option<usize>, Box<dyn Error>> {
+    match args.get(4) {
+        None => Ok(None),
+        Some(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("leaf count must be nonzero".into());
+            }
+            Ok(Some(parsed))
         }
     }
 }
