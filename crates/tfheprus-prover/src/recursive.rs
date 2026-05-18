@@ -60,6 +60,7 @@ pub(crate) struct ChainSummaryLayout {
     pub len: usize,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct RecursiveBatchProof {
     public_inputs: Vec<Challenge>,
     proof: BatchStarkProof<GoldilocksConfig>,
@@ -76,6 +77,14 @@ impl RecursiveBatchProof {
         &self.proof
     }
 
+    pub(crate) fn rebuild_common_lookups(&mut self) -> Result<(), ProofError> {
+        let config = goldilocks_config();
+        let prover = recursive_verifier_prover(config, self.proof.table_packing.clone());
+        prover
+            .rebuild_common_lookups(&mut self.proof)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+    }
+
     pub fn table_count(&self) -> usize {
         self.proof.proof.opened_values.instances.len()
     }
@@ -88,6 +97,14 @@ impl RecursiveBatchProof {
 impl AggregatedRecursiveBatchProof {
     pub(crate) fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
         &self.proof
+    }
+
+    pub(crate) fn rebuild_common_lookups(&mut self) -> Result<(), ProofError> {
+        let config = goldilocks_config();
+        let prover = recursive_verifier_prover(config, self.proof.table_packing.clone());
+        prover
+            .rebuild_common_lookups(&mut self.proof)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
     }
 
     pub fn table_count(&self) -> usize {

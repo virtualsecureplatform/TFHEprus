@@ -76,6 +76,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Postcard serialization for the recursive PBS root proof. The tree CLI
   round-trips the root artifact through bytes before root verification and
   reports the serialized size.
+- Checkpoint artifacts for recursive PBS proving. Individual recursive chunk
+  leaves can be written to disk, later aggregated into a serialized root proof,
+  and verified independently from the root artifact.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -103,6 +106,11 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive 
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive paper-v1 1
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive toy 2 4
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive paper-v1 1 3
+mkdir -p target/pbs-checkpoints
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 0 target/pbs-checkpoints/toy-leaf-0.bin
+cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 1 target/pbs-checkpoints/toy-leaf-1.bin
+cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaves-recursive target/pbs-checkpoints/toy-root.bin target/pbs-checkpoints/toy-leaf-0.bin target/pbs-checkpoints/toy-leaf-1.bin
+cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin
 cargo run -p tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
@@ -239,6 +247,18 @@ The CLI also serializes the root-only package, decodes it, and verifies the
 decoded aggregate root proof against the public chain summary without
 re-verifying all children from the high-level wrapper.
 
+The checkpoint path works on serialized recursive leaf artifacts. On the current
+runner, `prove-pbs-chain-leaf-recursive toy 2 0` wrote a
+`artifact_bytes=1511770` leaf for steps `0..2`, and chunk index `1` wrote
+`artifact_bytes=1514224` for steps `2..4`. Aggregating those two leaf files with
+`aggregate-pbs-chain-leaves-recursive` produced a one-layer root with
+`root_public_inputs=871`, `chain_summary_fields=55`,
+`aggregate_us=11904232`, `verify_us=466210`, `root_verify_us=15007`, and
+`root_artifact_bytes=906094`. `verify-pbs-chain-root-artifact-recursive`
+verified the resulting root artifact from disk with `verify_us=17713`. The
+deserializer rehydrates lookup metadata that Plonky3 native verification can
+rebuild internally but recursive verifier circuit construction needs explicitly.
+
 For planning full paper-v1 runs without allocating keys or proving, the tree
 profiler reports the chunk schedule and leaf statement sizes. `cargo run -p
 tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
@@ -248,12 +268,12 @@ tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `full_chunk_private_inputs=229896`, and
 `total_leaf_private_inputs=20920536`.
 
-Remaining gap to paper-param PBS: run or schedule the full 728-step paper-v1
-prefix under the aggregation tree, add durable checkpoint/resume support for
-large paper-v1 runs, replace the current PoC digest with the final paper-style
-hash/commitment chain, harden recursive MMCS verification for capped Merkle
-commitments, and add the final TFHE key-switch if the target statement needs
-ciphertexts under the original output LWE key.
+Remaining gap to paper-param PBS: execute the full 728-step paper-v1 run using
+the checkpoint artifact flow, improve the scheduler so later leaf checkpoints do
+not need to recompute long native prefixes, replace the current PoC digest with
+the final paper-style hash/commitment chain, harden recursive MMCS verification
+for capped Merkle commitments, and add the final TFHE key-switch if the target
+statement needs ciphertexts under the original output LWE key.
 
 ## Validation
 

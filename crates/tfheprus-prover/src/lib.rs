@@ -88,6 +88,7 @@ pub struct ActualPbsStepChainProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct ActualPbsChainChunkProof {
     pub params: Params,
     pub step_count: usize,
@@ -177,6 +178,7 @@ impl ActualPbsChainSummary {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct RecursiveActualPbsChainChunkProof {
     pub base: ActualPbsChainChunkProof,
     pub recursion: recursive::RecursiveBatchProof,
@@ -882,7 +884,26 @@ pub fn serialize_aggregated_recursive_actual_pbs_chain_root_proof(
 pub fn deserialize_aggregated_recursive_actual_pbs_chain_root_proof(
     bytes: &[u8],
 ) -> Result<AggregatedRecursiveActualPbsChainRootProof, ProofError> {
-    postcard::from_bytes(bytes).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+    let mut proof: AggregatedRecursiveActualPbsChainRootProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    proof.root.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
+pub fn serialize_recursive_actual_pbs_chain_chunk_proof(
+    proof: &RecursiveActualPbsChainChunkProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_recursive_actual_pbs_chain_chunk_proof(
+    bytes: &[u8],
+) -> Result<RecursiveActualPbsChainChunkProof, ProofError> {
+    let mut proof: RecursiveActualPbsChainChunkProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    rebuild_circuit_proof_common_lookups(&mut proof.base.proof)?;
+    proof.recursion.rebuild_common_lookups()?;
+    Ok(proof)
 }
 
 fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> {
@@ -1098,6 +1119,18 @@ fn verify_circuit_proof(
     register_range_check_provers(&mut prover, &range_bit_counts);
     prover
         .verify_all_tables(proof)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+}
+
+fn rebuild_circuit_proof_common_lookups(
+    proof: &mut BatchStarkProof<GoldilocksConfig>,
+) -> Result<(), ProofError> {
+    let config = goldilocks_config();
+    let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
+    let range_bit_counts = proof_range_check_bit_counts(proof);
+    register_range_check_provers(&mut prover, &range_bit_counts);
+    prover
+        .rebuild_common_lookups(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
