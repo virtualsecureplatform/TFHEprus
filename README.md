@@ -51,6 +51,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Plonky3 chained PBS-step PoC. The selected GGSW ciphertext and the LWE mask
   element are private witnesses, and the public statement carries BSK-chain and
   ciphertext-chain digest transitions plus accumulator endpoints.
+- Plonky3 chained PBS chunk PoC. Multiple consecutive blind-rotation steps can
+  be composed inside one proof with only the chunk input/output accumulator and
+  digest endpoints public.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -70,6 +73,7 @@ cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
+cargo run -p tfheprus-cli -- prove-pbs-chain-chunk paper-v1 2
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -138,6 +142,12 @@ both the selected GGSW ciphertext and the LWE mask element private, while public
 inputs carry the input/output accumulator and BSK/ciphertext digest transitions.
 On the current runner it verified with `public_inputs=4112`,
 `private_inputs=28737`, `prove_us=23380094`, and `verify_us=19191`.
+
+The chained chunk proof composes consecutive private-mask/private-selector
+steps while keeping only the chunk endpoints public. On the current runner,
+`cargo run --release -p tfheprus-cli -- prove-pbs-chain-chunk paper-v1 2`
+verified two paper-shaped steps with `public_inputs=4112`,
+`private_inputs=57474`, `prove_us=47030295`, and `verify_us=19652`.
 
 ## Validation
 

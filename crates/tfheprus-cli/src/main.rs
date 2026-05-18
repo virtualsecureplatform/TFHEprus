@@ -5,20 +5,21 @@ use std::time::Instant;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
-    pbs_bsk_digest_initial, pbs_mask_digest_initial, ActualPbsCircuitProfile, ActualPbsInstance,
-    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    pbs_bsk_digest_initial, pbs_mask_digest_initial, ActualPbsChainChunkInstance,
+    ActualPbsCircuitProfile, ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
+    ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, EvaluationKey, GlweCiphertext,
     Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
-    prove_actual_pbs, prove_actual_pbs_step, prove_actual_pbs_step_chain,
-    prove_actual_pbs_step_private, prove_mul_xai, prove_poly_mul, prove_sample_extract,
-    verify_actual_pbs_proof, verify_actual_pbs_step_chain_proof,
-    verify_actual_pbs_step_private_proof, verify_actual_pbs_step_proof, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_sample_extract_proof,
+    prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
+    prove_actual_pbs_step_chain, prove_actual_pbs_step_private, prove_mul_xai, prove_poly_mul,
+    prove_sample_extract, verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
+    verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
+    verify_actual_pbs_step_proof, verify_mul_xai_proof, verify_poly_mul_proof,
+    verify_sample_extract_proof,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -32,6 +33,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-pbs-step") => prove_pbs_step_demo(parse_preset_arg(&args)?)?,
         Some("prove-pbs-step-private") => prove_pbs_step_private_demo(parse_preset_arg(&args)?)?,
         Some("prove-pbs-step-chain") => prove_pbs_step_chain_demo(parse_preset_arg(&args)?)?,
+        Some("prove-pbs-chain-chunk") => prove_pbs_chain_chunk_demo(
+            parse_preset_arg(&args)?,
+            parse_chunk_step_count_arg(&args)?,
+        )?,
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
@@ -278,6 +283,50 @@ fn prove_pbs_step_chain_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+fn prove_pbs_chain_chunk_demo(
+    preset: ParamPreset,
+    step_count: usize,
+) -> Result<(), Box<dyn Error>> {
+    let (params, instance) = actual_pbs_chain_chunk_instance(preset.params(), step_count)?;
+    let public_inputs = instance.public_inputs().len();
+    let private_inputs = instance.private_inputs().len();
+
+    let prove_started = Instant::now();
+    let proof = prove_actual_pbs_chain_chunk(&instance)?;
+    let prove_time = prove_started.elapsed();
+
+    let verify_started = Instant::now();
+    verify_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "pbs-chain-chunk proof verified: preset={}, steps={}, glwe_dimension={}, degree={}, public_inputs={}, private_inputs={}",
+        preset.name(),
+        proof.step_count,
+        proof.params.glwe_dimension,
+        proof.params.polynomial_size,
+        public_inputs,
+        private_inputs
+    );
+    println!(
+        "prove_ms={}, prove_us={}, verify_ms={}, verify_us={}",
+        prove_time.as_millis(),
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
+    );
+    println!(
+        "exponents={:?}, bsk_digest_out={}, mask_digest_out={}, output_body0={}, params_n={}",
+        proof.exponents,
+        format_coefficients(&instance.bsk_digest_out),
+        format_coefficients(&instance.mask_digest_out),
+        instance.output_accumulator.body[0].value(),
+        params.lwe_dimension
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -387,6 +436,36 @@ fn actual_pbs_first_step_instance(params: Params) -> (Params, ActualPbsStepInsta
     (params, instance)
 }
 
+fn actual_pbs_chain_chunk_instance(
+    params: Params,
+    step_count: usize,
+) -> Result<(Params, ActualPbsChainChunkInstance), Box<dyn Error>> {
+    if step_count == 0 || step_count > params.lwe_dimension {
+        return Err(format!(
+            "chunk step count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    let (params, _sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let input_accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let instance = ActualPbsChainChunkInstance::new(
+        params.clone(),
+        input.mask[..step_count].to_vec(),
+        input_accumulator,
+        evaluation_key.bootstrapping_key[..step_count].to_vec(),
+        pbs_bsk_digest_initial(),
+        pbs_mask_digest_initial(),
+    );
+    Ok((params, instance))
+}
+
 fn actual_pbs_materials(
     params: Params,
 ) -> (
@@ -443,7 +522,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -493,6 +572,19 @@ fn parse_prove_preset_arg(args: &[String]) -> Result<ParamPreset, Box<dyn Error>
         );
     }
     Ok(preset)
+}
+
+fn parse_chunk_step_count_arg(args: &[String]) -> Result<usize, Box<dyn Error>> {
+    match args.get(3) {
+        None => Ok(2),
+        Some(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("chunk step count must be nonzero".into());
+            }
+            Ok(parsed)
+        }
+    }
 }
 
 fn field_elements_to_mib(field_elements: usize) -> f64 {

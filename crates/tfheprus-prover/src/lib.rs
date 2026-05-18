@@ -18,11 +18,12 @@ use range_check::{
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use tfheprus_circuits::{
-    build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
+    build_actual_pbs_chain_chunk_circuit, build_actual_pbs_circuit,
+    build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
     build_actual_pbs_step_private_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
-    build_sample_extract_circuit, ActualPbsInstance, ActualPbsStepChainInstance,
-    ActualPbsStepInstance, ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance,
-    SampleExtractInstance,
+    build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
+    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::Params;
 
@@ -75,6 +76,14 @@ pub struct ActualPbsStepChainProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+pub struct ActualPbsChainChunkProof {
+    pub params: Params,
+    pub step_count: usize,
+    pub exponents: Vec<usize>,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofError {
     StatementMismatch,
@@ -99,6 +108,7 @@ pub type ActualPbsProofError = ProofError;
 pub type ActualPbsStepProofError = ProofError;
 pub type ActualPbsStepPrivateProofError = ProofError;
 pub type ActualPbsStepChainProofError = ProofError;
+pub type ActualPbsChainChunkProofError = ProofError;
 
 pub fn prove_poly_mul(instance: &PolyMulInstance) -> Result<PolyMulProof, ProofError> {
     let circuit = build_poly_mul_circuit(instance.degree())
@@ -345,6 +355,46 @@ pub fn prove_and_verify_actual_pbs_step_chain(
 ) -> Result<(), ProofError> {
     let proof = prove_actual_pbs_step_chain(instance)?;
     verify_actual_pbs_step_chain_proof(instance, &proof)
+}
+
+pub fn prove_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<ActualPbsChainChunkProof, ProofError> {
+    let circuit = build_actual_pbs_chain_chunk_circuit(instance)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.public_inputs();
+    let private_inputs = instance.private_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs, &private_inputs)?;
+
+    Ok(ActualPbsChainChunkProof {
+        params: instance.params.clone(),
+        step_count: instance.step_count(),
+        exponents: instance.exponents.clone(),
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn verify_actual_pbs_chain_chunk_proof(
+    instance: &ActualPbsChainChunkInstance,
+    proof: &ActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    if proof.params != instance.params
+        || proof.step_count != instance.step_count()
+        || proof.exponents != instance.exponents
+        || proof.public_inputs != instance.public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
+}
+
+pub fn prove_and_verify_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<(), ProofError> {
+    let proof = prove_actual_pbs_chain_chunk(instance)?;
+    verify_actual_pbs_chain_chunk_proof(instance, &proof)
 }
 
 fn prove_circuit(
@@ -686,6 +736,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn proves_and_verifies_chained_actual_pbs_chunk_with_approximate_decomposition() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let instance = actual_pbs_chain_chunk_instance_with_params(params, 2);
+
+        prove_and_verify_actual_pbs_chain_chunk(&instance).unwrap();
+    }
+
+    #[test]
+    fn rejects_chained_actual_pbs_chunk_statement_mismatch() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let instance = actual_pbs_chain_chunk_instance_with_params(params, 2);
+        let proof = prove_actual_pbs_chain_chunk(&instance).unwrap();
+        let mut other_instance = instance.clone();
+        other_instance.bsk_digest_out[0] += Goldilocks::ONE;
+
+        assert_eq!(
+            verify_actual_pbs_chain_chunk_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
     fn proves_and_verifies_actual_pbs_with_params(params: Params) {
         let mut rng = ChaCha20Rng::seed_from_u64(101);
         let sk = SecretKey::generate(&params, &mut rng);
@@ -737,6 +809,39 @@ mod tests {
             input.mask[0],
             input_accumulator,
             ek.bootstrapping_key[0].clone(),
+        )
+    }
+
+    fn actual_pbs_chain_chunk_instance_with_params(
+        params: Params,
+        step_count: usize,
+    ) -> ActualPbsChainChunkInstance {
+        let mut rng = ChaCha20Rng::seed_from_u64(103);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let input_accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+
+        ActualPbsChainChunkInstance::new(
+            params,
+            input.mask[..step_count].to_vec(),
+            input_accumulator,
+            ek.bootstrapping_key[..step_count].to_vec(),
+            pbs_bsk_digest_initial(),
+            pbs_mask_digest_initial(),
         )
     }
 
