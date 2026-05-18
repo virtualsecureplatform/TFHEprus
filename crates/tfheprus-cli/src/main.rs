@@ -25,7 +25,8 @@ use tfheprus_prover::{
     verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
     verify_actual_pbs_step_proof,
     verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof,
-    verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof, verify_mul_xai_proof,
+    verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof,
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
     verify_poly_mul_proof, verify_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_sample_extract_proof, ActualPbsChainChunkStatement,
 };
@@ -710,27 +711,39 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         .map(|layer| layer.len().to_string())
         .collect::<Vec<_>>()
         .join(",");
+    let root_table_count = proof.root_table_count().unwrap_or(0);
+    let root_public_input_count = proof.root_public_input_count().unwrap_or(0);
+    let chain_summary_fields = proof.chain_summary.field_values().len();
+    let leaf_count = proof.leaf_count();
+    let layer_count = proof.layer_count();
+    let root_summary = proof.chain_summary.clone();
+    let root_proof = proof.into_root_proof()?;
+    let root_verify_started = Instant::now();
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(&root_summary, &root_proof)?;
+    let root_verify_time = root_verify_started.elapsed();
     println!(
         "pbs-chain-tree aggregate recursive proof verified: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}, chain_summary_fields={}",
         preset.name(),
         chunk_step_count,
         chunk_count,
         total_steps,
-        proof.leaf_count(),
-        proof.layer_count(),
+        leaf_count,
+        layer_count,
         layer_sizes,
-        proof.root_table_count().unwrap_or(0),
-        proof.root_public_input_count().unwrap_or(0),
-        proof.chain_summary.field_values().len()
+        root_table_count,
+        root_public_input_count,
+        chain_summary_fields
     );
     println!(
-        "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, verify_ms={}, verify_us={}, root_verify_ms={}, root_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
         total_leaf_prove_time.as_millis(),
         total_leaf_prove_time.as_micros(),
         aggregate_time.as_millis(),
         aggregate_time.as_micros(),
         verify_time.as_millis(),
         verify_time.as_micros(),
+        root_verify_time.as_millis(),
+        root_verify_time.as_micros(),
         max_base_private_inputs,
         max_recursive_public_inputs,
         format_coefficients(&bsk_digest),

@@ -195,6 +195,11 @@ pub struct AggregatedRecursiveActualPbsChainChunkTreeProof {
     pub chain_summary: ActualPbsChainSummary,
 }
 
+pub struct AggregatedRecursiveActualPbsChainRootProof {
+    pub chain_summary: ActualPbsChainSummary,
+    pub root: recursive::AggregatedRecursiveBatchProof,
+}
+
 impl AggregatedRecursiveActualPbsChainChunkTreeProof {
     pub fn leaf_count(&self) -> usize {
         self.leaves.len()
@@ -216,6 +221,21 @@ impl AggregatedRecursiveActualPbsChainChunkTreeProof {
             .last()
             .and_then(|layer| layer.first())
             .map(|proof| proof.table_count())
+    }
+
+    pub fn into_root_proof(self) -> Result<AggregatedRecursiveActualPbsChainRootProof, ProofError> {
+        let mut root_layer = self
+            .layers
+            .into_iter()
+            .last()
+            .ok_or(ProofError::StatementMismatch)?;
+        if root_layer.len() != 1 {
+            return Err(ProofError::StatementMismatch);
+        }
+        Ok(AggregatedRecursiveActualPbsChainRootProof {
+            chain_summary: self.chain_summary,
+            root: root_layer.remove(0),
+        })
     }
 }
 
@@ -834,6 +854,19 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
         return Err(ProofError::StatementMismatch);
     }
     Ok(())
+}
+
+pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+    summary: &ActualPbsChainSummary,
+    proof: &AggregatedRecursiveActualPbsChainRootProof,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_public_summary(
+        &proof.root,
+        &summary.field_values(),
+    )
 }
 
 fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> {

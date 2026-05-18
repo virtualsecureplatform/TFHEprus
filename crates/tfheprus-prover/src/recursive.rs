@@ -286,6 +286,14 @@ pub fn verify_aggregated_recursive_batch(
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
+pub(crate) fn verify_aggregated_recursive_batch_with_public_summary(
+    proof: &AggregatedRecursiveBatchProof,
+    summary: &[F],
+) -> Result<(), ProofError> {
+    verify_public_summary_suffix(&proof.public_inputs, summary)?;
+    verify_aggregated_recursive_batch(proof)
+}
+
 pub(crate) fn verify_aggregated_recursive_batch_with_summary_for_child_proofs(
     left: &BatchStarkProof<GoldilocksConfig>,
     right: &BatchStarkProof<GoldilocksConfig>,
@@ -842,6 +850,21 @@ fn append_summary_public_inputs(inputs: &mut Vec<Challenge>, summary: &[F]) {
     inputs.extend(summary.iter().copied().map(Challenge::from));
 }
 
+fn verify_public_summary_suffix(inputs: &[Challenge], summary: &[F]) -> Result<(), ProofError> {
+    if inputs.len() < summary.len() {
+        return Err(ProofError::StatementMismatch);
+    }
+    let start = inputs.len() - summary.len();
+    if inputs[start..]
+        .iter()
+        .copied()
+        .ne(summary.iter().copied().map(Challenge::from))
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+    Ok(())
+}
+
 fn assert_public_ops_have_rows(circuit: &Circuit<Challenge>) -> Result<(), ProofError> {
     let missing = circuit
         .ops
@@ -870,4 +893,32 @@ fn fri_verifier_params() -> p3_recursion::FriVerifierParams {
 
 fn map_recursion_error(error: VerificationError) -> ProofError {
     ProofError::Plonky3(format!("{error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifies_public_summary_suffix() {
+        let summary = vec![F::from_u64(1), F::from_u64(2), F::from_u64(3)];
+        let mut public_inputs = vec![
+            Challenge::from(F::from_u64(9)),
+            Challenge::from(F::from_u64(1)),
+            Challenge::from(F::from_u64(2)),
+            Challenge::from(F::from_u64(3)),
+        ];
+
+        verify_public_summary_suffix(&public_inputs, &summary).unwrap();
+
+        public_inputs[2] = Challenge::from(F::from_u64(7));
+        assert_eq!(
+            verify_public_summary_suffix(&public_inputs, &summary),
+            Err(ProofError::StatementMismatch)
+        );
+        assert_eq!(
+            verify_public_summary_suffix(&public_inputs[..2], &summary),
+            Err(ProofError::StatementMismatch)
+        );
+    }
 }

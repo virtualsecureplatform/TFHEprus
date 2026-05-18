@@ -69,6 +69,10 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Recursive aggregation for PBS chunks. Recursive chunk proofs can be reduced
   through a carry-up aggregation tree, including non-power-of-two chunk counts
   needed by practical paper-v1 schedules.
+- Root-summary verification for recursive PBS aggregation. The tree wrapper can
+  be consumed into a root proof plus the public PBS-chain summary, letting the
+  verifier check the aggregate root without receiving all leaf and intermediate
+  proofs.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -178,9 +182,11 @@ proved and verified the recursive verifier for one actual PBS chunk step with
 `base_public_inputs=48`, `base_private_inputs=257`,
 `recursive_public_inputs=107`, `prove_us=5994080`, and `verify_us=93789`.
 Paper-shaped recursive chunk proofs also run: `paper-v1 1` verified with
-`recursive_public_inputs=4194`, `prove_us=35095520`, and `verify_us=231143`;
-`paper-v1 2` verified with `base_private_inputs=57474`, `prove_us=58362432`,
-and `verify_us=261047`.
+`recursive_public_inputs=8313`, `chain_summary_fields=4119`,
+`prove_us=35046039`, and `verify_us=7745859`; `paper-v1 2` verified with
+`base_private_inputs=57474`, `recursive_public_inputs=8313`,
+`chain_summary_fields=4119`, `prove_us=58357036`, and
+`verify_us=15467881`.
 
 The chunked recursive prefix driver verifies consecutive recursive chunk proofs
 while carrying accumulator and digest-chain state across chunk boundaries.
@@ -188,9 +194,10 @@ while carrying accumulator and digest-chain state across chunk boundaries.
 covered all 8 toy blind-rotation steps as 4 recursive chunks and matched the
 native NTT PBS output, decrypting `full_prefix_output_message=3`. It took
 `total_prove_us=24220579` and `total_verify_us=380389`. The paper-shaped prefix
-smoke `paper-v1 2 4` covered 4 consecutive steps as 2 recursive chunks with
-`total_prove_us=117131533`, `total_verify_us=487465`,
-`max_base_private_inputs=57474`, and `max_recursive_public_inputs=4194`.
+smoke `paper-v1 2 4` covered 4 consecutive steps as 2 recursive chunks; after
+adding the public PBS-chain summary suffix, each two-step paper chunk uses
+`recursive_public_inputs=8313`, `chain_summary_fields=4119`, and
+`base_private_inputs=57474`.
 The recursive chunk CLI uses the public-statement verifier path, so the
 verification step is based on public endpoints and digest commitments rather
 than the private chunk witness. A larger `paper-v1 4` recursive chunk verified
@@ -214,15 +221,19 @@ prove-pbs-chain-tree-aggregate-recursive toy 2 4` covered all 8 toy PBS steps
 as four two-step chunks, matched the native NTT PBS output with
 `full_tree_output_message=3`, and produced a two-layer tree with
 `layer_sizes=[2,1]`, `root_public_inputs=3677`, `chain_summary_fields=55`,
-`aggregate_prove_us=35806594`, and `verify_us=1131877`. The odd-leaf path also
+`aggregate_prove_us=35648515`, `verify_us=1131391`, and
+`root_verify_us=16306`. The odd-leaf path also
 works at paper shape: `paper-v1 1 3` covered three one-step chunks with
 `layer_sizes=[1,1]`, `root_public_inputs=95906`,
-`chain_summary_fields=4119`, `leaf_prove_us=105279811`,
-`aggregate_prove_us=32910907`, and `verify_us=24014646`. Tree verification now
-also checks that public chunk statements form one continuous PBS chain: matching
-params, bounded total step count, accumulator handoff, BSK digest handoff, and
-mask digest handoff. The recursive leaf and aggregate circuits expose this
-PBS-chain summary as public inputs and constrain summary composition in-circuit.
+`chain_summary_fields=4119`, `leaf_prove_us=105159837`,
+`aggregate_prove_us=32730400`, `verify_us=24102311`, and
+`root_verify_us=38571`. Tree verification now also checks that public chunk
+statements form one continuous PBS chain: matching params, bounded total step
+count, accumulator handoff, BSK digest handoff, and mask digest handoff. The
+recursive leaf and aggregate circuits expose this PBS-chain summary as public
+inputs and constrain summary composition in-circuit. The CLI also verifies the
+root-only package by checking the aggregate root proof against the public chain
+summary, without re-verifying all children from the high-level wrapper.
 
 For planning full paper-v1 runs without allocating keys or proving, the tree
 profiler reports the chunk schedule and leaf statement sizes. `cargo run -p
@@ -234,12 +245,11 @@ tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `total_leaf_private_inputs=20920536`.
 
 Remaining gap to paper-param PBS: run or schedule the full 728-step paper-v1
-prefix under the aggregation tree, package the final aggregate statement
-succinctly without shipping all child proofs in the high-level wrapper, replace
-the current PoC digest with the final paper-style hash/commitment chain, harden
-recursive MMCS verification for capped Merkle commitments, and add the final
-TFHE key-switch if the target statement needs ciphertexts under the original
-output LWE key.
+prefix under the aggregation tree, make the root-only package the stable
+serialized proof artifact, replace the current PoC digest with the final
+paper-style hash/commitment chain, harden recursive MMCS verification for capped
+Merkle commitments, and add the final TFHE key-switch if the target statement
+needs ciphertexts under the original output LWE key.
 
 ## Validation
 
