@@ -48,6 +48,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   NTT-domain selector used by CMUX. This matches the paper direction of keeping
   bootstrapping-key material private behind compact public commitments, although
   it is not yet the final recursive Poseidon/hash-chain construction.
+- Plonky3 chained PBS-step PoC. The selected GGSW ciphertext and the LWE mask
+  element are private witnesses, and the public statement carries BSK-chain and
+  ciphertext-chain digest transitions plus accumulator endpoints.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -66,6 +69,7 @@ cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
+cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -127,6 +131,13 @@ with `public_inputs=4101`, `private_inputs=28736`, `prove_us=23295556`, and
 to prove the statement shape and public-value binding. A production security
 path still needs the recursive hash-chain design from the paper, preferably with
 the Plonky3 recursion hash used by the verifier.
+
+The chained step moves closer to the IVC statement in the paper:
+`cargo run --release -p tfheprus-cli -- prove-pbs-step-chain paper-v1` keeps
+both the selected GGSW ciphertext and the LWE mask element private, while public
+inputs carry the input/output accumulator and BSK/ciphertext digest transitions.
+On the current runner it verified with `public_inputs=4112`,
+`private_inputs=28737`, `prove_us=23380094`, and `verify_us=19191`.
 
 ## Validation
 

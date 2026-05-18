@@ -5,16 +5,18 @@ use std::time::Instant;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
-    ActualPbsCircuitProfile, ActualPbsInstance, ActualPbsStepInstance,
-    ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    pbs_bsk_digest_initial, pbs_mask_digest_initial, ActualPbsCircuitProfile, ActualPbsInstance,
+    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, EvaluationKey, GlweCiphertext,
     Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
-    prove_actual_pbs, prove_actual_pbs_step, prove_actual_pbs_step_private, prove_mul_xai,
-    prove_poly_mul, prove_sample_extract, verify_actual_pbs_proof,
+    prove_actual_pbs, prove_actual_pbs_step, prove_actual_pbs_step_chain,
+    prove_actual_pbs_step_private, prove_mul_xai, prove_poly_mul, prove_sample_extract,
+    verify_actual_pbs_proof, verify_actual_pbs_step_chain_proof,
     verify_actual_pbs_step_private_proof, verify_actual_pbs_step_proof, verify_mul_xai_proof,
     verify_poly_mul_proof, verify_sample_extract_proof,
 };
@@ -29,6 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-actual-pbs") => prove_actual_pbs_demo(parse_prove_preset_arg(&args)?)?,
         Some("prove-pbs-step") => prove_pbs_step_demo(parse_preset_arg(&args)?)?,
         Some("prove-pbs-step-private") => prove_pbs_step_private_demo(parse_preset_arg(&args)?)?,
+        Some("prove-pbs-step-chain") => prove_pbs_step_chain_demo(parse_preset_arg(&args)?)?,
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
@@ -227,6 +230,54 @@ fn prove_pbs_step_private_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+fn prove_pbs_step_chain_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> {
+    let (params, public_instance) = actual_pbs_first_step_instance(preset.params());
+    let instance = ActualPbsStepChainInstance::new(
+        public_instance.params.clone(),
+        public_instance.mask_value,
+        public_instance.input_accumulator,
+        public_instance.selector,
+        pbs_bsk_digest_initial(),
+        pbs_mask_digest_initial(),
+    );
+    let public_inputs = instance.public_inputs().len();
+    let private_inputs = instance.private_inputs().len();
+
+    let prove_started = Instant::now();
+    let proof = prove_actual_pbs_step_chain(&instance)?;
+    let prove_time = prove_started.elapsed();
+
+    let verify_started = Instant::now();
+    verify_actual_pbs_step_chain_proof(&instance, &proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "pbs-step-chain proof verified: preset={}, exponent={}, glwe_dimension={}, degree={}, public_inputs={}, private_inputs={}",
+        preset.name(),
+        proof.exponent,
+        proof.params.glwe_dimension,
+        proof.params.polynomial_size,
+        public_inputs,
+        private_inputs
+    );
+    println!(
+        "prove_ms={}, prove_us={}, verify_ms={}, verify_us={}",
+        prove_time.as_millis(),
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
+    );
+    println!(
+        "bsk_digest_out={}, mask_digest_out={}, output_body0={}, params_n={}",
+        format_coefficients(&instance.bsk_digest_out),
+        format_coefficients(&instance.mask_digest_out),
+        instance.output_accumulator.body[0].value(),
+        params.lwe_dimension
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -392,7 +443,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 

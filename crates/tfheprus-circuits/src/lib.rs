@@ -267,6 +267,79 @@ impl ActualPbsStepPrivateInstance {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsStepChainInstance {
+    pub params: Params,
+    pub mask_value: Goldilocks,
+    pub input_accumulator: GlweCiphertext,
+    pub selector: GgswCiphertext,
+    pub bsk_digest_in: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    pub bsk_digest_out: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    pub mask_digest_in: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    pub mask_digest_out: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    pub output_accumulator: GlweCiphertext,
+    pub exponent: usize,
+}
+
+impl ActualPbsStepChainInstance {
+    pub fn new(
+        params: Params,
+        mask_value: Goldilocks,
+        input_accumulator: GlweCiphertext,
+        selector: GgswCiphertext,
+        bsk_digest_in: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+        mask_digest_in: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    ) -> Self {
+        assert_eq!(input_accumulator.mask.len(), params.glwe_dimension);
+        assert_eq!(input_accumulator.body.len(), params.polynomial_size);
+        assert_eq!(selector.rows.len(), params.glwe_dimension + 1);
+
+        let exponent = mod_switch_to_exponent(&params, mask_value);
+        let rotated = input_accumulator.mul_xai(exponent);
+        let output_accumulator = cmux(&params, &input_accumulator, &rotated, &selector);
+        let bsk_digest_out = pbs_bsk_digest_update(bsk_digest_in, &selector);
+        let mask_digest_out = pbs_mask_digest_update(mask_digest_in, mask_value);
+
+        Self {
+            params,
+            mask_value,
+            input_accumulator,
+            selector,
+            bsk_digest_in,
+            bsk_digest_out,
+            mask_digest_in,
+            mask_digest_out,
+            output_accumulator,
+            exponent,
+        }
+    }
+
+    pub fn public_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        append_glwe_public_inputs(&mut inputs, &self.input_accumulator);
+        append_digest_public_inputs(&mut inputs, &self.bsk_digest_in);
+        append_digest_public_inputs(&mut inputs, &self.bsk_digest_out);
+        append_digest_public_inputs(&mut inputs, &self.mask_digest_in);
+        append_digest_public_inputs(&mut inputs, &self.mask_digest_out);
+        append_glwe_public_inputs(&mut inputs, &self.output_accumulator);
+        inputs
+    }
+
+    pub fn private_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        append_ggsw_ntt_private_inputs(&mut inputs, &self.selector);
+        inputs.push(core_to_p3(self.mask_value));
+        append_actual_pbs_step_private_inputs(
+            &self.params,
+            self.mask_value,
+            &self.input_accumulator,
+            self.exponent,
+            &mut inputs,
+        );
+        inputs
+    }
+}
+
 impl ActualPbsInstance {
     pub fn new(
         params: Params,
@@ -636,12 +709,77 @@ pub fn build_actual_pbs_step_private_circuit(
     Ok(builder.build()?)
 }
 
+pub fn build_actual_pbs_step_chain_circuit(
+    instance: &ActualPbsStepChainInstance,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert!(instance.params.polynomial_size > 0);
+    assert!(instance.params.polynomial_size.is_power_of_two());
+    assert!(instance.params.glwe_dimension > 0);
+
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
+    if let Some(error_bits) = decomposition_error_bits(&instance.params) {
+        register_range_check_npo(&mut builder, error_bits);
+    }
+
+    let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+    let bsk_digest_in = alloc_public_digest(&mut builder, "actual_pbs_step_bsk_digest_in");
+    let bsk_digest_out = alloc_public_digest(&mut builder, "actual_pbs_step_bsk_digest_out");
+    let mask_digest_in = alloc_public_digest(&mut builder, "actual_pbs_step_mask_digest_in");
+    let mask_digest_out = alloc_public_digest(&mut builder, "actual_pbs_step_mask_digest_out");
+    let output_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+    let selector = alloc_private_ggsw_ntt(&mut builder, &instance.params);
+    let mask_value = builder.alloc_private_input("actual_pbs_step_private_mask_value");
+
+    let computed_bsk_digest_out =
+        digest_update_expr(&mut builder, bsk_digest_in, ggsw_ntt_expr_values(&selector));
+    connect_digest(&mut builder, &computed_bsk_digest_out, &bsk_digest_out);
+    let computed_mask_digest_out = digest_update_expr(&mut builder, mask_digest_in, [mask_value]);
+    connect_digest(&mut builder, &computed_mask_digest_out, &mask_digest_out);
+
+    let exponent_bits =
+        mod_switch_exponent_bits_expr(&mut builder, mask_value, instance.params.exponent_modulus());
+    let rotated = glwe_mul_xai_by_bits_expr(&mut builder, &input_accumulator, &exponent_bits);
+    let computed = cmux_expr(
+        &mut builder,
+        &instance.params,
+        &input_accumulator,
+        &rotated,
+        &selector,
+    );
+    connect_glwe(&mut builder, &computed, &output_accumulator);
+
+    Ok(builder.build()?)
+}
+
 pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
 
 pub fn selector_ntt_digest(ct: &GgswCiphertext) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
     selector_digest_from_values(ggsw_ntt_values(ct))
+}
+
+pub fn pbs_bsk_digest_initial() -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    digest_initial_state(0x6273_6b5f_6368_6169)
+}
+
+pub fn pbs_mask_digest_initial() -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    digest_initial_state(0x6d61_736b_6368_6169)
+}
+
+pub fn pbs_bsk_digest_update(
+    previous: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    selector: &GgswCiphertext,
+) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    digest_update_from_values(previous, ggsw_ntt_values(selector))
+}
+
+pub fn pbs_mask_digest_update(
+    previous: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    mask_value: Goldilocks,
+) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    digest_update_from_values(previous, [mask_value])
 }
 
 fn append_polynomial_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
@@ -653,6 +791,13 @@ fn append_glwe_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlweCiphertext
         append_polynomial_public_inputs(inputs, poly);
     }
     append_polynomial_public_inputs(inputs, &ct.body);
+}
+
+fn append_digest_public_inputs(
+    inputs: &mut Vec<P3Goldilocks>,
+    digest: &[Goldilocks; SELECTOR_DIGEST_WIDTH],
+) {
+    inputs.extend(digest.iter().copied().map(core_to_p3));
 }
 
 fn append_polynomial_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
@@ -720,7 +865,13 @@ fn ggsw_ntt_values(ct: &GgswCiphertext) -> Vec<Goldilocks> {
 fn selector_digest_from_values(
     values: impl IntoIterator<Item = Goldilocks>,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    let mut state = core::array::from_fn(selector_digest_initial_state);
+    digest_update_from_values(core::array::from_fn(selector_digest_initial_state), values)
+}
+
+fn digest_update_from_values(
+    mut state: [Goldilocks; SELECTOR_DIGEST_WIDTH],
+    values: impl IntoIterator<Item = Goldilocks>,
+) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
     let mut count = 0usize;
     for value in values {
         selector_digest_absorb(&mut state, count, value);
@@ -762,6 +913,10 @@ fn selector_digest_mds_native(
             .map(|(&value, &coeff)| value * Goldilocks::from_u64(coeff))
             .sum()
     })
+}
+
+fn digest_initial_state(tag: u64) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    core::array::from_fn(|lane| selector_digest_const(tag, lane, 0, 0))
 }
 
 fn selector_digest_initial_state(lane: usize) -> Goldilocks {
@@ -882,6 +1037,13 @@ fn alloc_public_glwe(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params
     GlweExpr { mask, body }
 }
 
+fn alloc_public_digest(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    label: &'static str,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    builder.alloc_public_input_array(label)
+}
+
 fn alloc_public_glev_ntt(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
@@ -957,16 +1119,34 @@ fn connect_glwe(
     }
 }
 
+fn connect_digest(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    actual: &[ExprId; SELECTOR_DIGEST_WIDTH],
+    expected: &[ExprId; SELECTOR_DIGEST_WIDTH],
+) {
+    for (&actual_limb, &expected_limb) in actual.iter().zip(expected.iter()) {
+        builder.connect(actual_limb, expected_limb);
+    }
+}
+
 fn selector_digest_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     selector: &GgswNttExpr,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
-    let mut state = core::array::from_fn(|lane| {
+    let state = core::array::from_fn(|lane| {
         builder.define_const(core_to_p3(selector_digest_initial_state(lane)))
     });
+    digest_update_expr(builder, state, ggsw_ntt_expr_values(selector))
+}
+
+fn digest_update_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    mut state: [ExprId; SELECTOR_DIGEST_WIDTH],
+    values: impl IntoIterator<Item = ExprId>,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
     let mut count = 0usize;
 
-    for value in ggsw_ntt_expr_values(selector) {
+    for value in values {
         selector_digest_absorb_expr(builder, &mut state, count, value);
         count += 1;
         if count.is_multiple_of(SELECTOR_DIGEST_CHUNK_SIZE) {
@@ -1643,6 +1823,36 @@ mod tests {
         );
 
         let circuit = build_actual_pbs_step_private_circuit(&instance).unwrap();
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner
+            .set_private_inputs(&instance.private_inputs())
+            .unwrap();
+        runner.run().unwrap();
+    }
+
+    #[test]
+    fn actual_pbs_step_chain_circuit_binds_private_selector_and_mask() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let input_accumulator = GlweCiphertext::trivial(
+            Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]),
+            params.glwe_dimension,
+        );
+        let mask_step = tfheprus_core::GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let instance = ActualPbsStepChainInstance::new(
+            params.clone(),
+            Goldilocks::from_u64(mask_step),
+            input_accumulator,
+            nonzero_ggsw(&params),
+            pbs_bsk_digest_initial(),
+            pbs_mask_digest_initial(),
+        );
+        assert_eq!(
+            instance.public_inputs().len(),
+            2 * (params.glwe_dimension + 1) * params.polynomial_size + 4 * SELECTOR_DIGEST_WIDTH
+        );
+
+        let circuit = build_actual_pbs_step_chain_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
         runner.set_public_inputs(&instance.public_inputs()).unwrap();
         runner
