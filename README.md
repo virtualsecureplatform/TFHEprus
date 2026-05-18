@@ -96,6 +96,7 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive 
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-pair-aggregate-recursive paper-v1 1
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive toy 2 4
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-tree-aggregate-recursive paper-v1 1 3
+cargo run -p tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
@@ -219,6 +220,14 @@ works at paper shape: `paper-v1 1 3` covered three one-step chunks with
 `verify_us=24816007`. Tree verification now also checks that public chunk
 statements form one continuous PBS chain: matching params, bounded total step
 count, accumulator handoff, BSK digest handoff, and mask digest handoff.
+
+For planning full paper-v1 runs without allocating keys or proving, the tree
+profiler reports the chunk schedule and leaf statement sizes. `cargo run -p
+tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
+`tree_depth=7`, `aggregation_nodes=90`, `layer_sizes=[45,23,11,6,3,1,1]`,
+`chunk_public_inputs=4112`, `step_private_inputs=28737`,
+`full_chunk_private_inputs=229896`, and
+`total_leaf_private_inputs=20920536`.
 
 Remaining gap to paper-param PBS: run or schedule the full 728-step paper-v1
 prefix under the aggregation tree, package the final aggregate statement

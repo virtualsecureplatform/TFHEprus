@@ -8,6 +8,7 @@ use tfheprus_circuits::{
     pbs_bsk_digest_initial, pbs_mask_digest_initial, ActualPbsChainChunkInstance,
     ActualPbsCircuitProfile, ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
     ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, sample_extract_index_zero,
@@ -66,6 +67,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 parse_optional_chunk_count_arg(&args)?,
             )?
         }
+        Some("profile-pbs-chain-tree") => profile_pbs_chain_tree_demo(
+            parse_preset_arg(&args)?,
+            parse_chunk_step_count_arg(&args)?,
+            parse_optional_total_step_count_arg(&args)?,
+        )?,
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
@@ -731,6 +737,75 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
     Ok(())
 }
 
+fn profile_pbs_chain_tree_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    requested_total_steps: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    let total_steps = requested_total_steps.unwrap_or(params.lwe_dimension);
+    if total_steps == 0 || total_steps > params.lwe_dimension {
+        return Err(format!(
+            "total step count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    let chunk_count = total_steps.div_ceil(chunk_step_count);
+    let full_chunk_count = total_steps / chunk_step_count;
+    let last_chunk_steps = if total_steps.is_multiple_of(chunk_step_count) {
+        chunk_step_count
+    } else {
+        total_steps % chunk_step_count
+    };
+    let layer_sizes = aggregation_layer_sizes(chunk_count);
+    let aggregation_nodes = layer_sizes.iter().sum::<usize>();
+    let chunk_public_inputs = estimated_chain_chunk_public_inputs(&params);
+    let step_private_inputs = estimated_chain_chunk_step_private_inputs(&params);
+    let full_chunk_private_inputs = estimated_chain_chunk_private_inputs(&params, chunk_step_count);
+    let last_chunk_private_inputs = estimated_chain_chunk_private_inputs(&params, last_chunk_steps);
+    let total_leaf_private_inputs = full_chunk_count
+        .checked_mul(full_chunk_private_inputs)
+        .and_then(|value| {
+            if last_chunk_steps == chunk_step_count {
+                Some(value)
+            } else {
+                value.checked_add(last_chunk_private_inputs)
+            }
+        })
+        .ok_or("total private input estimate overflowed")?;
+
+    print_param_line(preset.name(), &params);
+    println!(
+        "pbs-chain-tree profile: preset={}, total_steps={}, chunk_steps={}, chunk_count={}, full_chunk_count={}, last_chunk_steps={}, tree_depth={}, aggregation_nodes={}, layer_sizes=[{}]",
+        preset.name(),
+        total_steps,
+        chunk_step_count,
+        chunk_count,
+        full_chunk_count,
+        last_chunk_steps,
+        layer_sizes.len(),
+        aggregation_nodes,
+        layer_sizes
+            .iter()
+            .map(|size| size.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!(
+        "leaf_shape: chunk_public_inputs={}, step_private_inputs={}, full_chunk_private_inputs={}, last_chunk_private_inputs={}, total_leaf_private_inputs={}, total_leaf_private_mib={:.2}",
+        chunk_public_inputs,
+        step_private_inputs,
+        full_chunk_private_inputs,
+        last_chunk_private_inputs,
+        total_leaf_private_inputs,
+        field_elements_to_mib(total_leaf_private_inputs)
+    );
+
+    Ok(())
+}
+
 fn profile_actual_pbs_demo(preset: ParamPreset) {
     let params = preset.params();
     let profile = ActualPbsCircuitProfile::estimate(&params, params.lwe_dimension);
@@ -753,6 +828,46 @@ fn profile_actual_pbs_demo(preset: ParamPreset) {
         profile.decomposition_private_inputs_per_coeff,
         profile.torus_private_inputs
     );
+}
+
+fn aggregation_layer_sizes(mut node_count: usize) -> Vec<usize> {
+    let mut layer_sizes = Vec::new();
+    while node_count > 1 {
+        let pair_count = node_count / 2;
+        layer_sizes.push(pair_count);
+        node_count = pair_count + usize::from(!node_count.is_multiple_of(2));
+    }
+    layer_sizes
+}
+
+fn estimated_chain_chunk_public_inputs(params: &Params) -> usize {
+    let glwe_field_count = (params.glwe_dimension + 1) * params.polynomial_size;
+    2 * glwe_field_count + 4 * SELECTOR_DIGEST_WIDTH
+}
+
+fn estimated_chain_chunk_step_private_inputs(params: &Params) -> usize {
+    let glwe_polynomial_count = params.glwe_dimension + 1;
+    let ggsw_ntt_private_inputs = glwe_polynomial_count
+        * params.decomposition_level_count
+        * glwe_polynomial_count
+        * params.polynomial_size;
+    let decomposition_private_inputs_per_coeff = params.decomposition_level_count
+        + if uses_exact_binary_decomposition(params) {
+            0
+        } else {
+            2
+        };
+    let decomposition_private_inputs =
+        glwe_polynomial_count * params.polynomial_size * decomposition_private_inputs_per_coeff;
+    ggsw_ntt_private_inputs + 1 + 64 + decomposition_private_inputs
+}
+
+fn estimated_chain_chunk_private_inputs(params: &Params, step_count: usize) -> usize {
+    step_count * estimated_chain_chunk_step_private_inputs(params)
+}
+
+fn uses_exact_binary_decomposition(params: &Params) -> bool {
+    params.decomposition_base_log * params.decomposition_level_count == 64
 }
 
 fn run_actual_pbs_native_demo(preset: ParamPreset) {
@@ -926,7 +1041,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
