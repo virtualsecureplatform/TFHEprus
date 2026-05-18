@@ -10,8 +10,8 @@ enough to mirror in Plonky3 circuits.
 ## Workspace
 
 - `tfheprus-core`: native TFHE semantics over Goldilocks.
-- `tfheprus-circuits`: placeholder for Plonky3 circuit mirrors.
-- `tfheprus-prover`: placeholder for recursive prove/verify PoC.
+- `tfheprus-circuits`: Plonky3 circuit mirrors.
+- `tfheprus-prover`: Plonky3 prove/verify PoC.
 - `tfheprus-cli`: small command-line scaffold.
 
 ## Current Core Coverage
@@ -27,6 +27,17 @@ enough to mirror in Plonky3 circuits.
 `bootstrap_without_keyswitch` deliberately stops before the final TFHE
 key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 
+## Current Proof Coverage
+
+- Plonky3 circuit for public negacyclic polynomial multiplication over
+  Goldilocks.
+- Batch STARK prove/verify wrapper for the polynomial multiplication circuit.
+- CLI smoke test:
+
+```bash
+cargo run -p tfheprus-cli -- prove-poly-mul
+```
+
 ## Validation
 
 Run:
@@ -35,4 +46,5 @@ Run:
 cargo fmt --check
 cargo check --workspace
 cargo test
+cargo clippy --workspace --all-targets -- -D warnings
 ```

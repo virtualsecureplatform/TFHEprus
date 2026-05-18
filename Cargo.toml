@@ -5,6 +5,7 @@ members = [
     "crates/tfheprus-prover",
     "crates/tfheprus-cli",
 ]
+exclude = ["thirdparties/Plonky3-recursion"]
 resolver = "2"
 
 [workspace.package]
@@ -16,3 +17,8 @@ repository = "https://github.com/virtualsecureplatform/TFHEprus"
 rand = "0.8"
 rand_chacha = "0.3"
 thiserror = "1"
+p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-circuit = { path = "thirdparties/Plonky3-recursion/circuit" }
+p3-circuit-prover = { path = "thirdparties/Plonky3-recursion/circuit-prover" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "56952503e1401a62982ceaf952c5e4a829b61803" }

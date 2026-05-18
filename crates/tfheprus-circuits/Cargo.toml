@@ -7,3 +7,6 @@ repository.workspace = true
 
 [dependencies]
 tfheprus-core = { path = "../tfheprus-core" }
+p3-circuit.workspace = true
+p3-field.workspace = true
+p3-goldilocks.workspace = true

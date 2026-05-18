@@ -6,7 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tfheprus-circuits = { path = "../tfheprus-circuits" }
 tfheprus-core = { path = "../tfheprus-core" }
+tfheprus-prover = { path = "../tfheprus-prover" }
 
 [[bin]]
 name = "tfheprus"
