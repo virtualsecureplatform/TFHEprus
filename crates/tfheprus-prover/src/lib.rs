@@ -94,9 +94,36 @@ pub struct ActualPbsChainChunkProof {
     pub proof: BatchStarkProof<GoldilocksConfig>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsChainChunkStatement {
+    pub params: Params,
+    pub step_count: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+}
+
+impl ActualPbsChainChunkStatement {
+    pub fn from_instance(instance: &ActualPbsChainChunkInstance) -> Self {
+        Self {
+            params: instance.params.clone(),
+            step_count: instance.step_count(),
+            public_inputs: instance.public_inputs(),
+        }
+    }
+}
+
 pub struct RecursiveActualPbsChainChunkProof {
     pub base: ActualPbsChainChunkProof,
     pub recursion: recursive::RecursiveBatchProof,
+}
+
+impl ActualPbsChainChunkProof {
+    pub fn public_statement(&self) -> ActualPbsChainChunkStatement {
+        ActualPbsChainChunkStatement {
+            params: self.params.clone(),
+            step_count: self.step_count,
+            public_inputs: self.public_inputs.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +433,20 @@ pub fn verify_actual_pbs_chain_chunk_proof(
     verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
+pub fn verify_actual_pbs_chain_chunk_statement_proof(
+    statement: &ActualPbsChainChunkStatement,
+    proof: &ActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    if proof.params != statement.params
+        || proof.step_count != statement.step_count
+        || proof.public_inputs != statement.public_inputs
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
+}
+
 pub fn prove_and_verify_actual_pbs_chain_chunk(
     instance: &ActualPbsChainChunkInstance,
 ) -> Result<(), ProofError> {
@@ -427,6 +468,14 @@ pub fn verify_recursive_actual_pbs_chain_chunk_proof(
     proof: &RecursiveActualPbsChainChunkProof,
 ) -> Result<(), ProofError> {
     verify_actual_pbs_chain_chunk_proof(instance, &proof.base)?;
+    recursive::verify_recursive_batch_for_base(&proof.base.proof, &proof.recursion)
+}
+
+pub fn verify_recursive_actual_pbs_chain_chunk_statement_proof(
+    statement: &ActualPbsChainChunkStatement,
+    proof: &RecursiveActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    verify_actual_pbs_chain_chunk_statement_proof(statement, &proof.base)?;
     recursive::verify_recursive_batch_for_base(&proof.base.proof, &proof.recursion)
 }
 
@@ -563,6 +612,7 @@ pub(crate) fn goldilocks_poseidon2_8() -> Poseidon2Goldilocks<8> {
 
 #[cfg(test)]
 mod tests {
+    use p3_field::PrimeCharacteristicRing;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use tfheprus_circuits::{pbs_bsk_digest_initial, pbs_mask_digest_initial};
@@ -818,6 +868,23 @@ mod tests {
 
         assert_eq!(
             verify_actual_pbs_chain_chunk_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
+    #[test]
+    fn verifies_chained_actual_pbs_chunk_from_public_statement() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let instance = actual_pbs_chain_chunk_instance_with_params(params, 2);
+        let proof = prove_actual_pbs_chain_chunk(&instance).unwrap();
+        let statement = ActualPbsChainChunkStatement::from_instance(&instance);
+
+        verify_actual_pbs_chain_chunk_statement_proof(&statement, &proof).unwrap();
+
+        let mut mismatched_statement = statement.clone();
+        mismatched_statement.public_inputs[0] += P3Goldilocks::ONE;
+        assert_eq!(
+            verify_actual_pbs_chain_chunk_statement_proof(&mismatched_statement, &proof),
             Err(ProofError::StatementMismatch)
         );
     }

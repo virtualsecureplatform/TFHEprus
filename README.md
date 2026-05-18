@@ -61,6 +61,10 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - Chunked recursive PBS prefix driver. Consecutive chunks carry forward the
   accumulator, BSK digest, and ciphertext-mask digest, so the proof list can
   cover a prefix or the full blind rotation without regenerating keys per chunk.
+- Public-statement verifier path for recursive PBS chunks. Verification of the
+  chunk proof no longer needs the private selected GGSW ciphertexts or mask
+  values; it checks params, chunk length, public accumulator endpoints, and
+  digest-chain endpoints.
 - The PBS circuit derives the rounded mod-switch rotation bits from the public
   LWE body and mask values in-circuit; these values are no longer only
   statement-specific compile-time rotation constants.
@@ -178,6 +182,11 @@ native NTT PBS output, decrypting `full_prefix_output_message=3`. It took
 smoke `paper-v1 2 4` covered 4 consecutive steps as 2 recursive chunks with
 `total_prove_us=117131533`, `total_verify_us=487465`,
 `max_base_private_inputs=57474`, and `max_recursive_public_inputs=4194`.
+The recursive chunk CLI uses the public-statement verifier path, so the
+verification step is based on public endpoints and digest commitments rather
+than the private chunk witness. A larger `paper-v1 4` recursive chunk verified
+with `base_private_inputs=114948`, `recursive_public_inputs=4204`,
+`prove_us=106519302`, and `verify_us=299286`.
 
 Remaining gap to paper-param PBS: run or schedule the full 728-step
 paper-v1 prefix, aggregate the recursive chunk proofs into one succinct final

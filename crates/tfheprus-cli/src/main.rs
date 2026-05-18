@@ -21,7 +21,8 @@ use tfheprus_prover::{
     verify_actual_pbs_chain_chunk_proof, verify_actual_pbs_proof,
     verify_actual_pbs_step_chain_proof, verify_actual_pbs_step_private_proof,
     verify_actual_pbs_step_proof, verify_mul_xai_proof, verify_poly_mul_proof,
-    verify_recursive_actual_pbs_chain_chunk_proof, verify_sample_extract_proof,
+    verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
+    ActualPbsChainChunkStatement,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -349,7 +350,8 @@ fn prove_pbs_chain_chunk_recursive_demo(
     let prove_time = prove_started.elapsed();
 
     let verify_started = Instant::now();
-    verify_recursive_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+    let statement = ActualPbsChainChunkStatement::from_instance(&instance);
+    verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof)?;
     let verify_time = verify_started.elapsed();
 
     println!(
@@ -426,7 +428,8 @@ fn prove_pbs_chain_prefix_recursive_demo(
         let prove_time = prove_started.elapsed();
 
         let verify_started = Instant::now();
-        verify_recursive_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+        let statement = ActualPbsChainChunkStatement::from_instance(&instance);
+        verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof)?;
         let verify_time = verify_started.elapsed();
 
         println!(
