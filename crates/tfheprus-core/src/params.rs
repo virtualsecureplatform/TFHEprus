@@ -39,6 +39,16 @@ impl Params {
         Self::new(8, 8, 1, 16, 4, 4)
     }
 
+    /// Medium-sized exact-decomposition parameters for native PBS profiling.
+    ///
+    /// This is still not a secure TFHE parameter set. It keeps the same exact
+    /// Goldilocks gadget decomposition as `toy()` but increases both the LWE
+    /// dimension and polynomial size enough to make transform/key bottlenecks
+    /// visible in local benchmark runs.
+    pub fn moderate_toy() -> Self {
+        Self::new(32, 64, 1, 16, 4, 4)
+    }
+
     /// The parameter shape described in 451.pdf. This is available for API
     /// integration, but v1 correctness tests use `toy()` until the approximate
     /// TFHE decomposition and key switch are implemented.
