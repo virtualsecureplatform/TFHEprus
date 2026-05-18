@@ -9,7 +9,8 @@ use p3_circuit::circuit::Circuit;
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::{self, GoldilocksConfig};
 use p3_circuit_prover::{
-    BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, TablePacking,
+    BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, PrimitiveTable,
+    TablePacking, NUM_PRIMITIVE_TABLES,
 };
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use range_check::{
@@ -102,7 +103,7 @@ pub fn verify_poly_mul_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof)
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_poly_mul(instance: &PolyMulInstance) -> Result<(), ProofError> {
@@ -135,7 +136,7 @@ pub fn verify_mul_xai_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof)
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_mul_xai(instance: &MulXaiInstance) -> Result<(), ProofError> {
@@ -170,7 +171,7 @@ pub fn verify_sample_extract_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof)
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_sample_extract(instance: &SampleExtractInstance) -> Result<(), ProofError> {
@@ -206,7 +207,7 @@ pub fn verify_actual_pbs_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof)
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_actual_pbs(instance: &ActualPbsInstance) -> Result<(), ProofError> {
@@ -242,7 +243,7 @@ pub fn verify_actual_pbs_step_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    verify_circuit_proof(&proof.proof)
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
 pub fn prove_and_verify_actual_pbs_step(
@@ -294,7 +295,19 @@ fn prove_circuit(
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
-fn verify_circuit_proof(proof: &BatchStarkProof<GoldilocksConfig>) -> Result<(), ProofError> {
+fn verify_circuit_proof(
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    expected_public_inputs: &[P3Goldilocks],
+) -> Result<(), ProofError> {
+    if proof.primitive_public_values.len() != NUM_PRIMITIVE_TABLES {
+        return Err(ProofError::Plonky3(
+            "invalid primitive public-value table count".into(),
+        ));
+    }
+    if proof.primitive_public_values[PrimitiveTable::Public as usize] != expected_public_inputs {
+        return Err(ProofError::StatementMismatch);
+    }
+
     let config = config::goldilocks();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
@@ -376,6 +389,50 @@ mod tests {
         assert_eq!(
             verify_poly_mul_proof(&other_instance, &proof),
             Err(ProofError::StatementMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_forged_public_input_sidecar() {
+        let lhs = Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]);
+        let rhs = Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]);
+        let instance = PolyMulInstance::new(lhs, rhs);
+        let mut proof = prove_poly_mul(&instance).unwrap();
+
+        let other_lhs =
+            Polynomial::from_coeffs(vec![2u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]);
+        let other_rhs =
+            Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]);
+        let other_instance = PolyMulInstance::new(other_lhs, other_rhs);
+        proof.public_inputs = other_instance.public_inputs();
+
+        assert_eq!(
+            verify_poly_mul_proof(&other_instance, &proof),
+            Err(ProofError::StatementMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_forged_embedded_public_inputs() {
+        let lhs = Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]);
+        let rhs = Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]);
+        let instance = PolyMulInstance::new(lhs, rhs);
+        let mut proof = prove_poly_mul(&instance).unwrap();
+
+        let other_lhs =
+            Polynomial::from_coeffs(vec![2u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]);
+        let other_rhs =
+            Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]);
+        let other_instance = PolyMulInstance::new(other_lhs, other_rhs);
+        let other_public_inputs = other_instance.public_inputs();
+        proof.public_inputs = other_public_inputs.clone();
+        proof.proof.primitive_public_values[PrimitiveTable::Public as usize] = other_public_inputs;
+
+        let err = verify_poly_mul_proof(&other_instance, &proof)
+            .expect_err("tampered STARK public values must fail verification");
+        assert!(
+            matches!(err, ProofError::Plonky3(_)),
+            "unexpected error: {err:?}"
         );
     }
 

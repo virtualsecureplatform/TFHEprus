@@ -49,6 +49,9 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
 - The PBS circuit consumes the bootstrapping key in twisted NTT form, matching
   the TFHEpp-style transformed-key path and avoiding a key-side NTT inside each
   polynomial product.
+- Circuit public inputs are bound into the batch-STARK Fiat-Shamir transcript
+  through the primitive Public table, and verifier wrappers check that the
+  embedded public statement matches the requested TFHEprus instance.
 - Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
