@@ -8,6 +8,7 @@ pub mod ggsw;
 pub mod glev;
 pub mod glwe;
 pub mod keys;
+pub mod keyswitch;
 pub mod lwe;
 pub mod ntt;
 pub mod params;
@@ -24,6 +25,10 @@ pub use glev::{
 };
 pub use glwe::{sample_extract_index_zero, GlweCiphertext, GlweCiphertextNtt, GlweSecretKey};
 pub use keys::{EvaluationKey, EvaluationKeyNtt, SecretKey};
+pub use keyswitch::{
+    extract_trivial_lwe_prefix, glwe_keyswitch, glwe_keyswitch_ntt, trivial_lwe_extraction_key,
+    GlweKeySwitchKey, GlweKeySwitchKeyNtt,
+};
 pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};
 pub use ntt::{
     negacyclic_intt, negacyclic_mul_ntt, negacyclic_ntt, ntt, primitive_power_of_two_root,

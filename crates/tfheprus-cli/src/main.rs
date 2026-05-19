@@ -18,10 +18,11 @@ use tfheprus_circuits::{
     SHA3_DIGEST_WIDTH, SHA3_PBS_BSK_CHAIN_DOMAIN, SHA3_PBS_MASK_CHAIN_DOMAIN,
 };
 use tfheprus_core::{
-    bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, ggsw::cmux_ntt,
-    sample_extract_index_zero, sha3_256_field_elements, EvaluationKey, GlweCiphertext, Goldilocks,
-    LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
-    SHA3_256_DOMAIN_PREFIX,
+    blind_rotate_ntt, bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt,
+    extract_trivial_lwe_prefix, ggsw::cmux_ntt, glwe_keyswitch_ntt, sample_extract_index_zero,
+    sha3_256_field_elements, trivial_lwe_extraction_key, EvaluationKey, GlweCiphertext,
+    GlweKeySwitchKey, Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial,
+    GOLDILOCKS_MODULUS, SHA3_256_DOMAIN_PREFIX,
 };
 use tfheprus_prover::{
     build_aggregated_recursive_actual_pbs_chain_frontier_proof,
@@ -3046,12 +3047,27 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
     let key_ntt_time = key_started.elapsed();
 
     let ntt_started = Instant::now();
-    let output =
-        bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+    let accumulator = blind_rotate_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+    let output = sample_extract_index_zero(&accumulator);
     let ntt_time = ntt_started.elapsed();
     if let Some((coeff_output, _)) = &coeff_result {
         assert_eq!(&output, coeff_output);
     }
+
+    let glwe_ks_key_started = Instant::now();
+    let output_glwe_key = trivial_lwe_extraction_key(&params, &sk.input_lwe);
+    let glwe_ksk = GlweKeySwitchKey::generate(&params, &sk.glwe, &output_glwe_key, &mut rng);
+    let glwe_ksk_ntt = glwe_ksk.to_ntt();
+    let glwe_ks_key_time = glwe_ks_key_started.elapsed();
+
+    let glwe_ks_started = Instant::now();
+    let switched_accumulator = glwe_keyswitch_ntt(&params, &glwe_ksk_ntt, &accumulator);
+    let switched_output = extract_trivial_lwe_prefix(&switched_accumulator, params.lwe_dimension);
+    let glwe_ks_time = glwe_ks_started.elapsed();
+    assert_eq!(
+        output.decrypt(&params, &sk.extracted_output_lwe_key()),
+        switched_output.decrypt(&params, &sk.input_lwe)
+    );
 
     println!(
         "actual-pbs native run: preset={}, lwe_dimension={}, glwe_dimension={}, degree={}",
@@ -3061,7 +3077,7 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
         params.polynomial_size
     );
     println!(
-        "secret_keygen_ms={}, secret_keygen_us={}, eval_keygen_ms={}, eval_keygen_us={}, native_coeff_ms={}, native_coeff_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, native_ntt_ms={}, native_ntt_us={}",
+        "secret_keygen_ms={}, secret_keygen_us={}, eval_keygen_ms={}, eval_keygen_us={}, native_coeff_ms={}, native_coeff_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, native_ntt_ms={}, native_ntt_us={}, glwe_ks_keygen_ms={}, glwe_ks_keygen_us={}, glwe_keyswitch_ms={}, glwe_keyswitch_us={}",
         sk_time.as_millis(),
         sk_time.as_micros(),
         ek_time.as_millis(),
@@ -3071,12 +3087,17 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
         key_ntt_time.as_millis(),
         key_ntt_time.as_micros(),
         ntt_time.as_millis(),
-        ntt_time.as_micros()
+        ntt_time.as_micros(),
+        glwe_ks_key_time.as_millis(),
+        glwe_ks_key_time.as_micros(),
+        glwe_ks_time.as_millis(),
+        glwe_ks_time.as_micros()
     );
     println!(
-        "input_message={}, output_message={}",
+        "input_message={}, output_message={}, keyswitched_output_message={}",
         1,
-        output.decrypt(&params, &sk.extracted_output_lwe_key())
+        output.decrypt(&params, &sk.extracted_output_lwe_key()),
+        switched_output.decrypt(&params, &sk.input_lwe)
     );
 }
 

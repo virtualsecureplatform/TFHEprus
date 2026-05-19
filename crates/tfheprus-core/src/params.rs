@@ -51,9 +51,11 @@ impl Params {
         Self::new(32, 64, 1, 16, 4, 4)
     }
 
-    /// The parameter shape described in 451.pdf. This is available for API
-    /// integration, but v1 correctness tests use `toy()` until the approximate
-    /// TFHE decomposition and key switch are implemented.
+    /// The parameter shape described in 451.pdf.
+    ///
+    /// Native PBS uses the approximate TFHE decomposition and the GLWE
+    /// key-switch path. Proof tests still use smaller presets unless the CLI is
+    /// explicitly asked to run the paper-shaped recursive path.
     pub fn paper_v1() -> Self {
         Self::new(728, 1024, 1, 5, 4, 4)
     }

@@ -25,10 +25,14 @@ enough to mirror in Plonky3 circuits.
 - External product and CMUX, with coefficient-key and NTT-key variants.
 - Blind rotation and `bootstrap_without_keyswitch`, including an
   NTT-domain bootstrapping-key path.
-- Sample extraction to an LWE ciphertext under the extracted GLWE key.
+- Sample extraction to an LWE ciphertext under the extracted GLWE key, plus a
+  paper-style GLWE key switch whose target key makes the first `n` GLWE mask
+  coefficients a ciphertext under the original input LWE key.
 
-`bootstrap_without_keyswitch` deliberately stops before the final TFHE
-key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
+`bootstrap_without_keyswitch` deliberately exposes the pre-key-switch PBS
+output under `SecretKey::extracted_output_lwe_key()`. The native key-switch
+helpers can then switch the final accumulator to an extraction-compatible GLWE
+key derived from `SecretKey::input_lwe`.
 
 ## Current Proof Coverage
 
@@ -155,10 +159,12 @@ wires. On the current runner it reports `bsk_public_inputs=11927552`,
 `private_inputs_per_coeff=6` for approximate decomposition digits plus
 error/sign witnesses. `run-actual-pbs-native paper-v1` skips the coefficient
 reference run and completed the NTT-key native PBS with
-`eval_keygen_us=942965`, `key_ntt_precompute_us=471961`, and
-`native_ntt_us=842314`, decrypting the output message as expected. The
-paper-v1 proof command remains disabled until the monolithic PBS circuit is
-split into recursive/chunked proofs.
+`eval_keygen_us=942407`, `key_ntt_precompute_us=483785`,
+`native_ntt_us=859803`, `glwe_ks_keygen_us=845`, and
+`glwe_keyswitch_us=634`, decrypting both the extracted-key output and the
+key-switched original-key output to message `3`. The paper-v1 monolithic proof
+command remains disabled because the PBS proof path is split into
+recursive/chunked proofs.
 
 The single-step proof is available at paper shape. On the current runner,
 `cargo run --release -p tfheprus-cli -- prove-pbs-step paper-v1` verified one
@@ -320,8 +326,9 @@ The run reported `total_prove_us=2632942941`, `aggregate_us=158063586`,
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path. The remaining
-implementation gap is the final TFHE key-switch if the target statement needs
-ciphertexts under the original output LWE key.
+proof gap is including the final GLWE key switch in the recursive statement;
+the native key-switch path already decrypts the paper-v1 output under the
+original input LWE key.
 
 ## Validation
 
