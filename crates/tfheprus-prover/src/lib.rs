@@ -205,6 +205,12 @@ pub struct AggregatedRecursiveActualPbsChainNodeProof {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct AggregatedRecursiveActualPbsChainFrontierProof {
+    pub chain_summary: ActualPbsChainSummary,
+    pub nodes: Vec<AggregatedRecursiveActualPbsChainNodeProof>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct AggregatedRecursiveActualPbsChainRootProof {
     pub chain_summary: ActualPbsChainSummary,
     pub root: recursive::AggregatedRecursiveBatchProof,
@@ -268,6 +274,27 @@ impl AggregatedRecursiveActualPbsChainNodeProof {
             chain_summary: self.chain_summary,
             root: self.aggregation,
         }
+    }
+}
+
+impl AggregatedRecursiveActualPbsChainFrontierProof {
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn total_public_input_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(AggregatedRecursiveActualPbsChainNodeProof::public_input_count)
+            .sum()
+    }
+
+    pub fn max_public_input_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(AggregatedRecursiveActualPbsChainNodeProof::public_input_count)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -757,6 +784,21 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_node_pair_proof(
     )
 }
 
+pub fn build_aggregated_recursive_actual_pbs_chain_frontier_proof(
+    nodes: Vec<AggregatedRecursiveActualPbsChainNodeProof>,
+) -> Result<AggregatedRecursiveActualPbsChainFrontierProof, ProofError> {
+    let chain_summary = combine_actual_pbs_chain_summaries(
+        &nodes
+            .iter()
+            .map(|node| node.chain_summary.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(AggregatedRecursiveActualPbsChainFrontierProof {
+        chain_summary,
+        nodes,
+    })
+}
+
 pub fn validate_actual_pbs_chain_chunk_statements(
     statements: &[ActualPbsChainChunkStatement],
 ) -> Result<(), ProofError> {
@@ -788,6 +830,20 @@ pub fn validate_actual_pbs_chain_chunk_statements(
     }
 
     Ok(())
+}
+
+pub fn combine_actual_pbs_chain_summaries(
+    summaries: &[ActualPbsChainSummary],
+) -> Result<ActualPbsChainSummary, ProofError> {
+    let mut summaries = summaries.iter();
+    let mut summary = summaries
+        .next()
+        .ok_or(ProofError::StatementMismatch)?
+        .clone();
+    for next in summaries {
+        summary = ActualPbsChainSummary::combine(&summary, next)?;
+    }
+    Ok(summary)
 }
 
 pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_tree(
@@ -969,6 +1025,29 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_node_summary_proof(
     )
 }
 
+pub fn verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof(
+    summary: &ActualPbsChainSummary,
+    proof: &AggregatedRecursiveActualPbsChainFrontierProof,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    let combined_summary = combine_actual_pbs_chain_summaries(
+        &proof
+            .nodes
+            .iter()
+            .map(|node| node.chain_summary.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    if combined_summary != proof.chain_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    for node in &proof.nodes {
+        verify_aggregated_recursive_actual_pbs_chain_node_summary_proof(&node.chain_summary, node)?;
+    }
+    Ok(())
+}
+
 pub fn serialize_aggregated_recursive_actual_pbs_chain_root_proof(
     proof: &AggregatedRecursiveActualPbsChainRootProof,
 ) -> Result<Vec<u8>, ProofError> {
@@ -996,6 +1075,23 @@ pub fn deserialize_aggregated_recursive_actual_pbs_chain_node_proof(
     let mut proof: AggregatedRecursiveActualPbsChainNodeProof = postcard::from_bytes(bytes)
         .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
     proof.aggregation.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
+pub fn serialize_aggregated_recursive_actual_pbs_chain_frontier_proof(
+    proof: &AggregatedRecursiveActualPbsChainFrontierProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_aggregated_recursive_actual_pbs_chain_frontier_proof(
+    bytes: &[u8],
+) -> Result<AggregatedRecursiveActualPbsChainFrontierProof, ProofError> {
+    let mut proof: AggregatedRecursiveActualPbsChainFrontierProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    for node in &mut proof.nodes {
+        node.aggregation.rebuild_common_lookups()?;
+    }
     Ok(proof)
 }
 
