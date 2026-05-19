@@ -47,10 +47,11 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   private witness in this leaf, with a small public algebraic digest binding the
   NTT-domain selector used by CMUX. This matches the paper direction of keeping
   bootstrapping-key material private behind compact public commitments, although
-  it is not yet the final recursive Poseidon/hash-chain construction.
+  the chained PBS path below is the preferred Poseidon2 hash-chain statement.
 - Plonky3 chained PBS-step PoC. The selected GGSW ciphertext and the LWE mask
-  element are private witnesses, and the public statement carries BSK-chain and
-  ciphertext-chain digest transitions plus accumulator endpoints.
+  element are private witnesses, and the public statement carries Plonky3-native
+  Goldilocks Poseidon2 BSK-chain and ciphertext-mask-chain digest transitions
+  plus accumulator endpoints.
 - Plonky3 chained PBS chunk PoC. Multiple consecutive blind-rotation steps can
   be composed inside one proof with only the chunk input/output accumulator and
   digest endpoints public.
@@ -172,9 +173,10 @@ the selected GGSW ciphertext private and replaces its 16384 public NTT
 coefficients with a 4-field public digest. On the current runner it verified
 with `public_inputs=4101`, `private_inputs=28736`, `prove_us=23295556`, and
 `verify_us=18995`. The digest is an in-circuit Goldilocks algebraic sponge used
-to prove the statement shape and public-value binding. A production security
-path still needs the recursive hash-chain design from the paper, preferably with
-the Plonky3 recursion hash used by the verifier.
+to prove the statement shape and public-value binding. The chained PBS path now
+uses the same Plonky3-friendly Poseidon2 family as the recursive verifier, so
+the high-volume BSK/mask commitment chain no longer depends on the older
+algebraic selector digest.
 
 The chained step moves closer to the IVC statement in the paper:
 `cargo run --release -p tfheprus-cli -- prove-pbs-step-chain paper-v1` keeps
@@ -301,14 +303,13 @@ layer-3 proofs into an 82,002,970-byte artifact, and
 `total_public_inputs=13897142`, `max_public_inputs=2491473`, and
 `verify_us=4083332`.
 
-Remaining gap to the paper's PBS IVC shape: replace the current proof-of-proof
-aggregation, whose public input grows with child verifier data, with a
-fixed-shape IVC circuit where proof commitments/openings are private witness
-data and only the PBS state plus BSK/mask hash-chain summary remain public.
-The PoC digest should also be replaced with the final paper-style
-hash/commitment chain, recursive MMCS verification should be hardened for capped
-Merkle commitments, and the final TFHE key-switch should be added if the target
-statement needs ciphertexts under the original output LWE key.
+Current gap to the paper's PBS IVC shape: the compact-private recursive path now
+proves leaves and aggregates with summary-only public inputs, and the PBS
+BSK/mask chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. The
+full paper-v1 compact root still needs a fresh end-to-end run after this
+Poseidon2 switch, recursive MMCS verification still needs capped Merkle
+commitment hardening, and the final TFHE key-switch should be added if the
+target statement needs ciphertexts under the original output LWE key.
 
 ## Validation
 
@@ -319,4 +320,12 @@ cargo fmt --check
 cargo check --workspace
 cargo test
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The compact-private recursive PBS smoke test is ignored by default because it
+proves two recursive leaves plus one aggregate proof:
+
+```bash
+cargo test --release -p tfheprus-prover \
+  compact_recursive_private_pbs_public_inputs_remain_summary_only -- --ignored --nocapture
 ```

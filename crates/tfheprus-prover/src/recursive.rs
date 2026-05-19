@@ -600,6 +600,16 @@ pub(crate) fn verify_aggregated_recursive_batch_with_public_summary(
     verify_aggregated_recursive_batch(proof)
 }
 
+pub(crate) fn verify_aggregated_recursive_batch_with_private_summary(
+    proof: &AggregatedRecursiveBatchProof,
+    summary: &[F],
+) -> Result<(), ProofError> {
+    if proof.public_inputs != summary_public_inputs(summary) {
+        return Err(ProofError::StatementMismatch);
+    }
+    verify_aggregated_recursive_batch(proof)
+}
+
 pub(crate) fn verify_aggregated_recursive_batch_with_summary_for_child_proofs(
     left: &BatchStarkProof<GoldilocksConfig>,
     right: &BatchStarkProof<GoldilocksConfig>,

@@ -1076,11 +1076,9 @@ pub fn verify_private_compact_aggregated_recursive_actual_pbs_chain_node_pair_pr
     if proof.chain_summary != expected_summary {
         return Err(ProofError::StatementMismatch);
     }
-    recursive::verify_aggregated_recursive_batch_with_summary_for_child_proofs(
-        left.batch_proof(),
-        right.batch_proof(),
-        &proof.chain_summary.field_values(),
+    recursive::verify_aggregated_recursive_batch_with_private_summary(
         &proof.aggregation,
+        &proof.chain_summary.field_values(),
     )
 }
 
@@ -2438,6 +2436,74 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "recursive proof smoke is expensive"]
+    fn compact_recursive_private_pbs_public_inputs_remain_summary_only() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let (first, second) = two_single_step_chain_chunks(params);
+        let first_statement = ActualPbsChainChunkStatement::from_instance(&first);
+        let second_statement = ActualPbsChainChunkStatement::from_instance(&second);
+
+        let first_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&first).unwrap();
+        let second_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&second).unwrap();
+
+        assert_eq!(
+            first_leaf.recursion.public_input_count(),
+            first_leaf.chain_summary.field_values().len()
+        );
+        assert_eq!(
+            second_leaf.recursion.public_input_count(),
+            second_leaf.chain_summary.field_values().len()
+        );
+        assert_eq!(
+            first_leaf.recursion.public_input_count(),
+            compact_chain_summary_field_count()
+        );
+        assert_eq!(
+            second_leaf.recursion.public_input_count(),
+            compact_chain_summary_field_count()
+        );
+
+        verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof(
+            &first_statement,
+            &first_leaf,
+        )
+        .unwrap();
+        verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof(
+            &second_statement,
+            &second_leaf,
+        )
+        .unwrap();
+
+        let aggregate = prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair(
+            CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
+            CompactRecursiveActualPbsChainNode::Leaf(&second_leaf),
+        )
+        .unwrap();
+        let expected_summary = CompactActualPbsChainSummary::combine(
+            &first_leaf.chain_summary,
+            &second_leaf.chain_summary,
+        )
+        .unwrap();
+
+        assert_eq!(aggregate.chain_summary, expected_summary);
+        assert_eq!(
+            aggregate.public_input_count(),
+            expected_summary.field_values().len()
+        );
+        assert_eq!(
+            aggregate.public_input_count(),
+            compact_chain_summary_field_count()
+        );
+
+        verify_private_compact_aggregated_recursive_actual_pbs_chain_node_pair_proof(
+            CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
+            CompactRecursiveActualPbsChainNode::Leaf(&second_leaf),
+            &aggregate,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn rejects_chained_actual_pbs_chunk_wrong_circuit_shape() {
         let params = Params::new(2, 4, 1, 5, 4, 4);
         let instance = actual_pbs_chain_chunk_instance_with_params(params, 1);
@@ -2546,6 +2612,52 @@ mod tests {
             pbs_bsk_digest_initial(),
             pbs_mask_digest_initial(),
         )
+    }
+
+    fn two_single_step_chain_chunks(
+        params: Params,
+    ) -> (ActualPbsChainChunkInstance, ActualPbsChainChunkInstance) {
+        assert_eq!(
+            params.lwe_dimension, 2,
+            "test helper expects exactly two LWE mask steps"
+        );
+        let mut rng = ChaCha20Rng::seed_from_u64(104);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let input_accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+
+        let first = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[..1].to_vec(),
+            input_accumulator,
+            ek.bootstrapping_key[..1].to_vec(),
+            pbs_bsk_digest_initial(),
+            pbs_mask_digest_initial(),
+        );
+        let second = ActualPbsChainChunkInstance::new(
+            params,
+            input.mask[1..].to_vec(),
+            first.output_accumulator.clone(),
+            ek.bootstrapping_key[1..].to_vec(),
+            first.bsk_digest_out,
+            first.mask_digest_out,
+        );
+
+        (first, second)
     }
 
     #[test]
