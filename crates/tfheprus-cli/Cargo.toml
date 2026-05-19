@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+p3-circuit.workspace = true
+p3-field.workspace = true
+p3-goldilocks.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 tfheprus-circuits = { path = "../tfheprus-circuits" }

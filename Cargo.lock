@@ -1066,6 +1066,9 @@ dependencies = [
 name = "tfheprus-cli"
 version = "0.1.0"
 dependencies = [
+ "p3-circuit",
+ "p3-field",
+ "p3-goldilocks",
  "rand 0.8.6",
  "rand_chacha",
  "tfheprus-circuits",

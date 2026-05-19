@@ -4,18 +4,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use p3_circuit::CircuitBuilder;
+use p3_field::PrimeCharacteristicRing;
+use p3_goldilocks::Goldilocks as P3Goldilocks;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
     pbs_bsk_digest_initial, pbs_bsk_digest_update, pbs_mask_digest_initial, pbs_mask_digest_update,
-    ActualPbsChainChunkInstance, ActualPbsCircuitProfile, ActualPbsInstance,
-    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
+    sha3_circuit::sha3_256_field_elements_expr, ActualPbsChainChunkInstance,
+    ActualPbsCircuitProfile, ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
+    ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, ggsw::cmux_ntt,
-    sample_extract_index_zero, EvaluationKey, GlweCiphertext, Goldilocks, LweCiphertext, Params,
-    Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
+    sample_extract_index_zero, sha3_256_field_elements, EvaluationKey, GlweCiphertext, Goldilocks,
+    LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
+    SHA3_256_DOMAIN_PREFIX,
 };
 use tfheprus_prover::{
     build_aggregated_recursive_actual_pbs_chain_frontier_proof,
@@ -244,6 +249,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             parse_optional_total_step_count_arg(&args)?,
         )?,
         Some("profile-actual-pbs") => profile_actual_pbs_demo(parse_preset_arg(&args)?),
+        Some("profile-sha3-commit") => {
+            profile_sha3_commit_demo(parse_sha3_field_count_arg(&args)?)?
+        }
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
@@ -2682,6 +2690,72 @@ fn profile_actual_pbs_demo(preset: ParamPreset) {
     );
 }
 
+fn profile_sha3_commit_demo(field_count: usize) -> Result<(), Box<dyn Error>> {
+    if field_count == 0 {
+        return Err("field_count must be nonzero".into());
+    }
+
+    let domain = b"profile-sha3-commit";
+    let build_started = Instant::now();
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let values = builder.alloc_public_inputs(field_count, "sha3_profile_field");
+    let digest = sha3_256_field_elements_expr(&mut builder, domain, &values)?;
+    let expected = builder.alloc_public_inputs(8, "sha3_profile_expected");
+    for (&computed, &expected) in digest.iter().zip(&expected) {
+        builder.connect(computed, expected);
+    }
+    let circuit = builder.build()?;
+    let build_time = build_started.elapsed();
+
+    let native_values = (0..field_count)
+        .map(|index| Goldilocks::from_u64(index as u64 + 1))
+        .collect::<Vec<_>>();
+    let expected_digest =
+        sha3_256_field_elements(domain, native_values.iter().copied()).to_field_elements();
+    let mut public_inputs = native_values
+        .iter()
+        .map(|value| P3Goldilocks::from_u64(value.value()))
+        .collect::<Vec<_>>();
+    public_inputs.extend(
+        expected_digest
+            .iter()
+            .map(|value| P3Goldilocks::from_u64(value.value())),
+    );
+
+    let run_started = Instant::now();
+    let mut runner = circuit.runner();
+    runner.set_public_inputs(&public_inputs)?;
+    runner.run()?;
+    let run_time = run_started.elapsed();
+
+    let absorbed_bytes = SHA3_256_DOMAIN_PREFIX
+        .len()
+        .checked_add(4)
+        .and_then(|value| value.checked_add(domain.len()))
+        .and_then(|value| value.checked_add(field_count.checked_mul(8)?))
+        .ok_or("SHA3 profile byte count overflowed")?;
+    let keccak_blocks = sha3_padded_block_count(absorbed_bytes);
+    println!(
+        "sha3-commit profile: field_count={}, absorbed_bytes={}, keccak_blocks={}, public_inputs={}, circuit_ops={}, build_ms={}, build_us={}, run_ms={}, run_us={}, digest={}",
+        field_count,
+        absorbed_bytes,
+        keccak_blocks,
+        public_inputs.len(),
+        circuit.ops.len(),
+        build_time.as_millis(),
+        build_time.as_micros(),
+        run_time.as_millis(),
+        run_time.as_micros(),
+        format_coefficients(&expected_digest)
+    );
+
+    Ok(())
+}
+
+fn sha3_padded_block_count(input_bytes: usize) -> usize {
+    (input_bytes + 1) / 136 + 1
+}
+
 fn aggregation_layer_sizes(mut node_count: usize) -> Vec<usize> {
     let mut layer_sizes = Vec::new();
     while node_count > 1 {
@@ -2952,7 +3026,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -3050,6 +3124,19 @@ fn parse_required_chunk_count_arg(args: &[String]) -> Result<usize, Box<dyn Erro
             let parsed = value.parse::<usize>()?;
             if parsed == 0 {
                 return Err("chunk count must be nonzero".into());
+            }
+            Ok(parsed)
+        }
+    }
+}
+
+fn parse_sha3_field_count_arg(args: &[String]) -> Result<usize, Box<dyn Error>> {
+    match args.get(2) {
+        None => Ok(16),
+        Some(value) => {
+            let parsed = value.parse::<usize>()?;
+            if parsed == 0 {
+                return Err("SHA3 field count must be nonzero".into());
             }
             Ok(parsed)
         }
