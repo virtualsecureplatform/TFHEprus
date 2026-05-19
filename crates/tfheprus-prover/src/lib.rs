@@ -1562,7 +1562,14 @@ fn register_range_check_provers(
 type P3Challenge = BinomialExtensionField<P3Goldilocks, 2>;
 type P3Hash = PaddingFreeSponge<Poseidon2Goldilocks<8>, 8, 4, 4>;
 type P3Compress = TruncatedPermutation<Poseidon2Goldilocks<8>, 2, 4, 8>;
-type P3Mmcs = MerkleTreeMmcs<P3Goldilocks, P3Goldilocks, P3Hash, P3Compress, 2, 4>;
+type P3Mmcs = MerkleTreeMmcs<
+    <P3Goldilocks as p3_field::Field>::Packing,
+    <P3Goldilocks as p3_field::Field>::Packing,
+    P3Hash,
+    P3Compress,
+    2,
+    4,
+>;
 
 pub(crate) fn goldilocks_config() -> GoldilocksConfig {
     let perm = goldilocks_poseidon2_8();

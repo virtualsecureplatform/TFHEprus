@@ -37,7 +37,14 @@ type Challenge = BinomialExtensionField<F, 2>;
 type Perm = Poseidon2Goldilocks<8>;
 type MyHash = PaddingFreeSponge<Perm, 8, 4, 4>;
 type MyCompress = TruncatedPermutation<Perm, 2, 4, 8>;
-type MyMmcs = MerkleTreeMmcs<F, F, MyHash, MyCompress, 2, 4>;
+type MyMmcs = MerkleTreeMmcs<
+    <F as p3_field::Field>::Packing,
+    <F as p3_field::Field>::Packing,
+    MyHash,
+    MyCompress,
+    2,
+    4,
+>;
 type ChallengeMmcs = ExtensionMmcs<F, Challenge, MyMmcs>;
 type InnerFri = p3_recursion::pcs::FriProofTargets<
     F,
