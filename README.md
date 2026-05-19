@@ -321,12 +321,12 @@ post-switch run of `bench-pbs-chain-private-compact paper-v1 8 91` with
 the native NTT PBS output with
 `full_compact_leaf_checkpoint_output_message=3`, aggregated 91 leaves through
 90 compact recursive aggregate nodes, serialized
-`target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin`,
+`target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin`,
 and verified the root artifact with `params_n=728`, `total_steps=728`,
-`root_public_inputs=31`, `compact_summary_fields=31`, and `verify_us=3608`.
-The run reported `total_prove_us=2632942941`, `aggregate_us=158063586`,
-`total_us=2800000889`, `leaf_artifact_bytes=165375173`,
-`aggregate_artifact_bytes=16124081`, and `root_artifact_bytes=179144`.
+`root_public_inputs=31`, `compact_summary_fields=31`, and `verify_us=3461`.
+The run reported `total_prove_us=2621614911`, `aggregate_us=156483219`,
+`total_us=2787146162`, `leaf_artifact_bytes=165374478`,
+`aggregate_artifact_bytes=16124512`, and `root_artifact_bytes=179105`.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.
@@ -343,27 +343,30 @@ reduced public inputs to `2781`, but increased proof size to
 `1271582` bytes and was slower in this run (`prove_us=658246`), so the faster
 combined path currently keeps the KSK public. The combined command
 `prove-compact-root-keyswitch
-target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin`
+target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin`
 verifies the compact recursive root, checks the key-switch input accumulator
 against the root output-accumulator digest, proves and verifies the final GLWE
 key switch, and decrypts the final ciphertext under the original input LWE key
-with `key_switch_prove_us=676629`, `key_switch_verify_us=21616`, and
+with `key_switch_prove_us=674661`, `key_switch_verify_us=21813`, and
 `keyswitched_output_message=3`.
 
 The one-artifact recursive PBS-plus-key-switch path is:
 `cargo run --release -p tfheprus-cli --
 prove-compact-root-keyswitch-recursive
-target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin
-target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root-keyswitch-final.bin`,
+target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin
+target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root-keyswitch-final.bin`,
 followed by `cargo run --release -p tfheprus-cli --
 verify-compact-root-keyswitch-recursive
-target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root-keyswitch-final.bin`.
+target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root-keyswitch-final.bin`.
 This final recursive proof privately verifies the compact PBS root proof and the
 GLWE key-switch proof, links the key-switch input accumulator digest to the PBS
 root output digest in-circuit, and exposes only the compact PBS summary plus the
-final output LWE fields. Regenerate compact root artifacts after changes to the
-default encryption material, because the root digest binds the exact noisy
-ciphertext values.
+final output LWE fields. On the current runner it wrote a 228404-byte artifact
+with `final_public_inputs=760`, `recursive_prove_us=11001820`,
+`recursive_verify_us=4202`, standalone artifact `verify_us=6034`, and
+`keyswitched_output_message=3`. Regenerate compact root artifacts after changes
+to the default encryption material, because the root digest binds the exact
+noisy ciphertext values.
 
 ## Validation
 
