@@ -57,8 +57,8 @@ key-switch. The output decrypts under `SecretKey::extracted_output_lwe_key()`.
   digest endpoints public.
 - Plonky3 recursive verifier PoC for a chained PBS chunk proof. This proves and
   verifies the verifier for a real private-mask/private-selector PBS chunk
-  proof, using a TFHEprus-local Goldilocks STARK config with Merkle cap height
-  zero while the capped recursive MMCS path is hardened.
+  proof, using a TFHEprus-local Goldilocks STARK config with capped Merkle
+  commitments.
 - Chunked recursive PBS prefix driver. Consecutive chunks carry forward the
   accumulator, BSK digest, and ciphertext-mask digest, so the proof list can
   cover a prefix or the full blind rotation without regenerating keys per chunk.
@@ -307,9 +307,11 @@ Current gap to the paper's PBS IVC shape: the compact-private recursive path now
 proves leaves and aggregates with summary-only public inputs, and the PBS
 BSK/mask chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. The
 full paper-v1 compact root still needs a fresh end-to-end run after this
-Poseidon2 switch, recursive MMCS verification still needs capped Merkle
-commitment hardening, and the final TFHE key-switch should be added if the
-target statement needs ciphertexts under the original output LWE key.
+Poseidon2/capped-MMCS switch, and the final TFHE key-switch should be added if
+the target statement needs ciphertexts under the original output LWE key. The
+recursive STARK configs use capped Merkle commitments (`MERKLE_CAP_HEIGHT=2`),
+including a zero-depth capped MMCS verifier regression test for the case where
+the cap covers the whole opening path.
 
 ## Validation
 

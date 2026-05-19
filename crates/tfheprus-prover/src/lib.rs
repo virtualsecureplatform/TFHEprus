@@ -60,6 +60,7 @@ pub(crate) const PROOF_FRI_MAX_LOG_ARITY: usize = 3;
 pub(crate) const PROOF_FRI_COMMIT_POW_BITS: usize = 0;
 pub(crate) const PROOF_FRI_QUERY_POW_BITS: usize = 20;
 pub(crate) const PROOF_FRI_NUM_QUERIES: usize = 20;
+pub(crate) const MERKLE_CAP_HEIGHT: usize = 2;
 
 pub struct PolyMulProof {
     pub degree: usize,
@@ -2033,7 +2034,7 @@ fn goldilocks_config_with_fri(
     let perm = goldilocks_poseidon2_8();
     let hash = P3Hash::new(perm.clone());
     let compress = P3Compress::new(perm.clone());
-    let val_mmcs = P3Mmcs::new(hash, compress, 0);
+    let val_mmcs = P3Mmcs::new(hash, compress, MERKLE_CAP_HEIGHT);
     let challenge_mmcs = ExtensionMmcs::<P3Goldilocks, P3Challenge, P3Mmcs>::new(val_mmcs.clone());
     let dft = Radix2DitParallel::default();
     let fri_params = FriParameters {
