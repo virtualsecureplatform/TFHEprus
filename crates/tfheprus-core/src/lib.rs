@@ -32,8 +32,11 @@ pub use keyswitch::{
 };
 pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};
 pub use noise::{
+    sample_centered_binomial_noise, sample_centered_binomial_noise_polynomial,
+    sample_default_encryption_noise, sample_default_encryption_noise_polynomial,
     sample_uniform_bounded_noise, sample_uniform_bounded_noise_polynomial,
-    DEFAULT_ENCRYPTION_NOISE_BOUND,
+    DEFAULT_ENCRYPTION_CBD_TERMS, DEFAULT_ENCRYPTION_NOISE_BOUND,
+    DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
 };
 pub use ntt::{
     negacyclic_intt, negacyclic_mul_ntt, negacyclic_ntt, ntt, primitive_power_of_two_root,

@@ -2,7 +2,9 @@ use rand::RngCore;
 
 use crate::field::Goldilocks;
 use crate::lwe::{LweCiphertext, LweSecretKey};
-use crate::noise::{sample_uniform_bounded_noise_polynomial, DEFAULT_ENCRYPTION_NOISE_BOUND};
+use crate::noise::{
+    sample_default_encryption_noise_polynomial, sample_uniform_bounded_noise_polynomial,
+};
 use crate::params::Params;
 use crate::poly::{NttPolynomial, Polynomial};
 
@@ -86,7 +88,13 @@ impl GlweCiphertext {
         message: &Polynomial,
         rng: &mut R,
     ) -> Self {
-        Self::encrypt_with_noise_bound(params, sk, message, DEFAULT_ENCRYPTION_NOISE_BOUND, rng)
+        assert_eq!(message.len(), params.polynomial_size);
+        assert_eq!(sk.dimension(), params.glwe_dimension);
+        let mask = (0..params.glwe_dimension)
+            .map(|_| Polynomial::random(params.polynomial_size, rng))
+            .collect::<Vec<_>>();
+        let noise = sample_default_encryption_noise_polynomial(params.polynomial_size, rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 
     pub fn encrypt_with_noise_bound<R: RngCore + ?Sized>(
@@ -113,6 +121,17 @@ impl GlweCiphertext {
         mask: Vec<Polynomial>,
     ) -> Self {
         let noise = Polynomial::from_coeffs(vec![Goldilocks::ONE; params.polynomial_size]);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
+    }
+
+    pub fn encrypt_with_mask_and_default_noise<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        mask: Vec<Polynomial>,
+        rng: &mut R,
+    ) -> Self {
+        let noise = sample_default_encryption_noise_polynomial(params.polynomial_size, rng);
         Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 

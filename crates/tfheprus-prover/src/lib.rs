@@ -2753,7 +2753,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let body_exponent = mod_switch_to_exponent(&params, input.body);
         let initial_exponent =
@@ -2913,7 +2919,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let body_exponent = mod_switch_to_exponent(&params, input.body);
         let initial_exponent =
@@ -3004,7 +3016,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let native_output = bootstrap_without_keyswitch(&params, &ek, &input, &test_polynomial);
         let instance = ActualPbsInstance::new(params.clone(), input, test_polynomial, ek);
@@ -3030,7 +3048,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let body_exponent = mod_switch_to_exponent(&params, input.body);
         let initial_exponent =
@@ -3061,7 +3085,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let body_exponent = mod_switch_to_exponent(&params, input.body);
         let initial_exponent =
@@ -3097,7 +3127,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let body_exponent = mod_switch_to_exponent(&params, input.body);
         let initial_exponent =
@@ -3139,7 +3175,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
         let instance = ActualPbsInstance::new(params.clone(), input, test_polynomial, ek.clone());
         let proof = prove_actual_pbs(&instance).unwrap();
@@ -3147,8 +3189,13 @@ mod tests {
         let other_mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * (((index as u64 + 1) % 15) + 1)))
             .collect();
-        let other_input =
-            LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, other_mask);
+        let other_input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            other_mask,
+            &mut rng,
+        );
         let other_test_polynomial =
             TestPolynomial::single_slot(&params, input_message, output_message);
         let other_instance = ActualPbsInstance::new(params, other_input, other_test_polynomial, ek);

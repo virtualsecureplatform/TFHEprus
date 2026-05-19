@@ -174,7 +174,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let output = bootstrap_without_keyswitch(&params, &ek, &input, &test_poly);
         let output_ntt = bootstrap_without_keyswitch_ntt(&params, &ek.to_ntt(), &input, &test_poly);
         assert_eq!(output_ntt, output);

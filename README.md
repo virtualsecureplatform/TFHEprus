@@ -19,9 +19,9 @@ enough to mirror in Plonky3 circuits.
 - Goldilocks field arithmetic.
 - Negacyclic polynomial arithmetic in `F_q[X] / (X^N + 1)`, including a
   twisted Goldilocks NTT path.
-- LWE and GLWE encryption/decryption with bounded nonzero noise by default.
-  Exact/noise-zero constructors are kept only for trivial public ciphertexts
-  and algebraic test fixtures.
+- LWE and GLWE encryption/decryption with centered-binomial noise by default
+  (`centered_binomial_terms=32`). Exact/noise-zero constructors are kept only
+  for trivial public ciphertexts and algebraic test fixtures.
 - GLev/GGSW structures for exact toy decomposition and native paper-style
   approximate decomposition (`B=2^5, l=4` in `Params::paper_v1()`).
 - External product and CMUX, with coefficient-key and NTT-key variants.
@@ -163,12 +163,12 @@ wires. On the current runner it reports `bsk_public_inputs=11927552`,
 `private_inputs_per_coeff=6` for approximate decomposition digits plus
 error/sign witnesses. `run-actual-pbs-native paper-v1` skips the coefficient
 reference run and completed the NTT-key native PBS with
-`eval_keygen_us=942407`, `key_ntt_precompute_us=483785`,
-`native_ntt_us=859803`, `glwe_ks_keygen_us=845`, and
-`glwe_keyswitch_us=634`, decrypting both the extracted-key output and the
-key-switched original-key output to message `3`. The paper-v1 monolithic proof
-command remains disabled because the PBS proof path is split into
-recursive/chunked proofs.
+`eval_keygen_us=930982`, `key_ntt_precompute_us=489200`,
+`native_ntt_us=882475`, `glwe_ks_keygen_us=889`, and
+`glwe_keyswitch_us=632` under the centered-binomial default noise, decrypting
+both the extracted-key output and the key-switched original-key output to
+message `3`. The paper-v1 monolithic proof command remains disabled because
+the PBS proof path is split into recursive/chunked proofs.
 
 The single-step proof is available at paper shape. On the current runner,
 `cargo run --release -p tfheprus-cli -- prove-pbs-step paper-v1` verified one
@@ -335,12 +335,12 @@ The paper-style GLWE key-switch arithmetic is also proven as a standalone
 paper-v1 proof:
 `cargo run --release -p tfheprus-cli -- prove-glwe-keyswitch paper-v1`
 verified on the noisy default material path with `public_inputs=10969`,
-`private_inputs=6144`, `proof_bytes=1161166`, `prove_us=663204`,
-`verify_us=21753`, and `keyswitched_output_message=3`. The private-KSK digest
+`private_inputs=6144`, `proof_bytes=1161034`, `prove_us=638110`,
+`verify_us=21800`, and `keyswitched_output_message=3`. The private-KSK digest
 variant
 `cargo run --release -p tfheprus-cli -- bench-glwe-keyswitch-modes paper-v1`
 reduced public inputs to `2781`, but increased proof size to
-`1271075` bytes and was slower in this run (`prove_us=895317`), so the faster
+`1271582` bytes and was slower in this run (`prove_us=658246`), so the faster
 combined path currently keeps the KSK public. The combined command
 `prove-compact-root-keyswitch
 target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin`

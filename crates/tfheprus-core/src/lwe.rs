@@ -1,7 +1,7 @@
 use rand::RngCore;
 
 use crate::field::{Goldilocks, GOLDILOCKS_MODULUS};
-use crate::noise::{sample_uniform_bounded_noise, DEFAULT_ENCRYPTION_NOISE_BOUND};
+use crate::noise::{sample_default_encryption_noise, sample_uniform_bounded_noise};
 use crate::params::Params;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +44,11 @@ impl LweCiphertext {
         message: u64,
         rng: &mut R,
     ) -> Self {
-        Self::encrypt_with_noise_bound(params, sk, message, DEFAULT_ENCRYPTION_NOISE_BOUND, rng)
+        let mask = (0..sk.dimension())
+            .map(|_| Goldilocks::random(rng))
+            .collect::<Vec<_>>();
+        let noise = sample_default_encryption_noise(rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 
     pub fn encrypt_with_noise_bound<R: RngCore + ?Sized>(
@@ -78,6 +82,17 @@ impl LweCiphertext {
         mask: Vec<Goldilocks>,
     ) -> Self {
         Self::encrypt_with_mask_and_noise(params, sk, message, mask, Goldilocks::ONE)
+    }
+
+    pub fn encrypt_with_mask_and_default_noise<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &LweSecretKey,
+        message: u64,
+        mask: Vec<Goldilocks>,
+        rng: &mut R,
+    ) -> Self {
+        let noise = sample_default_encryption_noise(rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 
     pub fn encrypt_with_mask_and_noise_bound<R: RngCore + ?Sized>(

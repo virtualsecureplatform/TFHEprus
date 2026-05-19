@@ -23,7 +23,7 @@ use tfheprus_core::{
     extract_trivial_lwe_prefix, ggsw::cmux_ntt, glwe_keyswitch_ntt, sample_extract_index_zero,
     sha3_256_field_elements, trivial_lwe_extraction_key, EvaluationKey, GlweCiphertext,
     GlweKeySwitchKey, Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial,
-    DEFAULT_ENCRYPTION_NOISE_BOUND, GOLDILOCKS_MODULUS, SHA3_256_DOMAIN_PREFIX,
+    DEFAULT_ENCRYPTION_NOISE_DESCRIPTION, GOLDILOCKS_MODULUS, SHA3_256_DOMAIN_PREFIX,
 };
 use tfheprus_prover::{
     build_aggregated_recursive_actual_pbs_chain_frontier_proof,
@@ -383,11 +383,11 @@ fn prove_glwe_keyswitch_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> 
     let verify_time = verify_started.elapsed();
 
     println!(
-        "glwe-keyswitch proof verified: preset={}, lwe_dimension={}, degree={}, noise_bound={}, public_inputs={}, private_inputs={}, proof_bytes={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, keyswitched_output_message={}",
+        "glwe-keyswitch proof verified: preset={}, lwe_dimension={}, degree={}, noise={}, public_inputs={}, private_inputs={}, proof_bytes={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, keyswitched_output_message={}",
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_BOUND,
+        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
         proof.public_inputs.len(),
         instance.private_inputs().len(),
         proof_bytes,
@@ -413,11 +413,11 @@ fn prove_glwe_keyswitch_private_key_digest_demo(preset: ParamPreset) -> Result<(
     let verify_time = verify_started.elapsed();
 
     println!(
-        "glwe-keyswitch-private-key-digest proof verified: preset={}, lwe_dimension={}, degree={}, noise_bound={}, public_inputs={}, private_inputs={}, ksk_digest_fields={}, proof_bytes={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, keyswitched_output_message={}",
+        "glwe-keyswitch-private-key-digest proof verified: preset={}, lwe_dimension={}, degree={}, noise={}, public_inputs={}, private_inputs={}, ksk_digest_fields={}, proof_bytes={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, keyswitched_output_message={}",
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_BOUND,
+        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
         proof.public_inputs.len(),
         instance.private_key_digest_private_inputs().len(),
         instance.key_switch_key_ntt_digest().len(),
@@ -458,11 +458,11 @@ fn bench_glwe_keyswitch_modes_demo(preset: ParamPreset) -> Result<(), Box<dyn Er
         "public-key"
     };
     println!(
-        "glwe-keyswitch mode comparison: preset={}, lwe_dimension={}, degree={}, noise_bound={}, public_key_public_inputs={}, public_key_private_inputs={}, public_key_proof_bytes={}, public_key_prove_us={}, public_key_verify_us={}, private_key_digest_public_inputs={}, private_key_digest_private_inputs={}, private_key_digest_proof_bytes={}, private_key_digest_prove_us={}, private_key_digest_verify_us={}, faster_prove_mode={}, keyswitched_output_message={}",
+        "glwe-keyswitch mode comparison: preset={}, lwe_dimension={}, degree={}, noise={}, public_key_public_inputs={}, public_key_private_inputs={}, public_key_proof_bytes={}, public_key_prove_us={}, public_key_verify_us={}, private_key_digest_public_inputs={}, private_key_digest_private_inputs={}, private_key_digest_proof_bytes={}, private_key_digest_prove_us={}, private_key_digest_verify_us={}, faster_prove_mode={}, keyswitched_output_message={}",
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_BOUND,
+        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
         public_proof.public_inputs.len(),
         instance.private_inputs().len(),
         public_proof_bytes,
@@ -3382,12 +3382,12 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
     );
 
     println!(
-        "actual-pbs native run: preset={}, lwe_dimension={}, glwe_dimension={}, degree={}, noise_bound={}",
+        "actual-pbs native run: preset={}, lwe_dimension={}, glwe_dimension={}, degree={}, noise={}",
         preset.name(),
         params.lwe_dimension,
         params.glwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_BOUND
+        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION
     );
     println!(
         "secret_keygen_ms={}, secret_keygen_us={}, eval_keygen_ms={}, eval_keygen_us={}, native_coeff_ms={}, native_coeff_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, native_ntt_ms={}, native_ntt_us={}, glwe_ks_keygen_ms={}, glwe_ks_keygen_us={}, glwe_keyswitch_ms={}, glwe_keyswitch_us={}",
@@ -3556,12 +3556,11 @@ fn actual_pbs_input<R: rand::RngCore + ?Sized>(
             Goldilocks::from_u64(mask_step * exponent as u64)
         })
         .collect();
-    let input = LweCiphertext::encrypt_with_mask_and_noise_bound(
+    let input = LweCiphertext::encrypt_with_mask_and_default_noise(
         params,
         &sk.input_lwe,
         input_message,
         mask,
-        DEFAULT_ENCRYPTION_NOISE_BOUND,
         rng,
     );
     let test_polynomial = TestPolynomial::single_slot(params, input_message, output_message);

@@ -133,7 +133,9 @@ mod tests {
         let glwe_key = trivial_lwe_extraction_key(&params, &lwe_key);
         let message = Polynomial::constant(params.polynomial_size, encode_message(&params, 2));
         let mask = vec![Polynomial::random(params.polynomial_size, &mut rng)];
-        let glwe = GlweCiphertext::encrypt_with_mask(&params, &glwe_key, &message, mask);
+        let glwe = GlweCiphertext::encrypt_with_mask_and_default_noise(
+            &params, &glwe_key, &message, mask, &mut rng,
+        );
         let lwe = extract_trivial_lwe_prefix(&glwe, params.lwe_dimension);
         assert_eq!(lwe.decrypt(&params, &lwe_key), 2);
     }
@@ -181,7 +183,13 @@ mod tests {
         let mask = (0..params.lwe_dimension)
             .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
             .collect();
-        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let input = LweCiphertext::encrypt_with_mask_and_default_noise(
+            &params,
+            &sk.input_lwe,
+            input_message,
+            mask,
+            &mut rng,
+        );
         let accumulator =
             blind_rotate_ntt(&params, &evaluation_key.to_ntt(), &input, &test_polynomial);
         let switched = glwe_keyswitch_ntt(&params, &ksk.to_ntt(), &accumulator);
