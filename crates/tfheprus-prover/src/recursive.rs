@@ -36,7 +36,11 @@ use tfheprus_core::Goldilocks;
 use crate::range_check::{
     proof_range_check_bit_counts, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
-use crate::{goldilocks_config, goldilocks_poseidon2_8, ProofError};
+use crate::{
+    goldilocks_config, goldilocks_poseidon2_8, proof_table_packing, ProofError,
+    RecursiveProofSizeBreakdown, PROOF_FRI_COMMIT_POW_BITS, PROOF_FRI_LOG_BLOWUP,
+    PROOF_FRI_LOG_FINAL_POLY_LEN, PROOF_FRI_QUERY_POW_BITS,
+};
 
 type F = P3Goldilocks;
 type Challenge = BinomialExtensionField<F, 2>;
@@ -109,6 +113,10 @@ impl RecursiveBatchProof {
     pub fn public_input_count(&self) -> usize {
         self.public_inputs.len()
     }
+
+    pub fn size_breakdown(&self) -> Result<RecursiveProofSizeBreakdown, ProofError> {
+        recursive_proof_size_breakdown(&self.public_inputs, &self.proof)
+    }
 }
 
 impl AggregatedRecursiveBatchProof {
@@ -131,6 +139,10 @@ impl AggregatedRecursiveBatchProof {
     pub fn public_input_count(&self) -> usize {
         self.public_inputs.len()
     }
+
+    pub fn size_breakdown(&self) -> Result<RecursiveProofSizeBreakdown, ProofError> {
+        recursive_proof_size_breakdown(&self.public_inputs, &self.proof)
+    }
 }
 
 pub(crate) fn prove_recursive_batch_with_leaf_summary(
@@ -139,7 +151,7 @@ pub(crate) fn prove_recursive_batch_with_leaf_summary(
     chunk_public_offset: usize,
 ) -> Result<RecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let table_public_inputs = table_public_inputs(proof);
     let (verification_circuit, verifier_inputs, mmcs_op_ids) =
         build_verifier_circuit_with_leaf_summary(proof, &config, summary, chunk_public_offset)?;
@@ -202,7 +214,7 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
     chunk_public_offset: usize,
 ) -> Result<RecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let table_public_inputs = table_public_inputs(proof);
     let (verification_circuit, verifier_inputs, mmcs_op_ids) =
         build_private_verifier_circuit_with_leaf_summary(
@@ -275,7 +287,7 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
     compact_layout: &ChainSummaryLayout,
 ) -> Result<RecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let table_public_inputs = table_public_inputs(proof);
     let (verification_circuit, verifier_inputs, mmcs_op_ids) =
         build_private_verifier_circuit_with_compact_leaf_summary(
@@ -395,7 +407,7 @@ pub(crate) fn prove_aggregate_batch_proofs_with_chain_summary(
     layout: Option<&ChainSummaryLayout>,
 ) -> Result<AggregatedRecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let (verification_circuit, left_inputs, right_inputs, left_mmcs_op_ids, right_mmcs_op_ids) =
         build_aggregation_verifier_circuit_with_chain_summary(
             left, right, &config, summary, layout,
@@ -475,7 +487,7 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
     layout: Option<&ChainSummaryLayout>,
 ) -> Result<AggregatedRecursiveBatchProof, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let (verification_circuit, left_inputs, right_inputs, left_mmcs_op_ids, right_mmcs_op_ids) =
         build_private_aggregation_verifier_circuit_with_chain_summary(
             left, right, &config, summary, layout,
@@ -1552,6 +1564,46 @@ fn flatten_extension_values(values: &[Challenge]) -> Vec<F> {
         .collect()
 }
 
+fn recursive_proof_size_breakdown(
+    public_inputs: &[Challenge],
+    proof: &BatchStarkProof<GoldilocksConfig>,
+) -> Result<RecursiveProofSizeBreakdown, ProofError> {
+    let public_inputs_bytes = serialized_len(public_inputs)?;
+    let batch_stark_bytes = serialized_len(proof)?;
+    let core_proof_bytes = serialized_len(&proof.proof)?;
+    let commitments_bytes = serialized_len(&proof.proof.commitments)?;
+    let opened_values_bytes = serialized_len(&proof.proof.opened_values)?;
+    let opening_proof_bytes = serialized_len(&proof.proof.opening_proof)?;
+    let global_lookup_data_bytes = serialized_len(&proof.proof.global_lookup_data)?;
+    let degree_bits_bytes = serialized_len(&proof.proof.degree_bits)?;
+    let primitive_public_values_bytes = serialized_len(&proof.primitive_public_values)?;
+    let non_primitives_bytes = serialized_len(&proof.non_primitives)?;
+    let accounted_batch_bytes = core_proof_bytes
+        .saturating_add(primitive_public_values_bytes)
+        .saturating_add(non_primitives_bytes);
+    let structural_metadata_bytes = batch_stark_bytes.saturating_sub(accounted_batch_bytes);
+
+    Ok(RecursiveProofSizeBreakdown {
+        public_inputs_bytes,
+        batch_stark_bytes,
+        core_proof_bytes,
+        commitments_bytes,
+        opened_values_bytes,
+        opening_proof_bytes,
+        global_lookup_data_bytes,
+        degree_bits_bytes,
+        primitive_public_values_bytes,
+        non_primitives_bytes,
+        structural_metadata_bytes,
+    })
+}
+
+fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, ProofError> {
+    postcard::to_allocvec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
 fn append_summary_public_inputs(inputs: &mut Vec<Challenge>, summary: &[F]) {
     inputs.extend(summary.iter().copied().map(Challenge::from));
 }
@@ -1598,7 +1650,13 @@ fn assert_public_ops_have_rows(circuit: &Circuit<Challenge>) -> Result<(), Proof
 }
 
 fn fri_verifier_params() -> p3_recursion::FriVerifierParams {
-    p3_recursion::FriVerifierParams::with_mmcs(1, 0, 0, 16, Poseidon2Config::GOLDILOCKS_D2_W8)
+    p3_recursion::FriVerifierParams::with_mmcs(
+        PROOF_FRI_LOG_BLOWUP,
+        PROOF_FRI_LOG_FINAL_POLY_LEN,
+        PROOF_FRI_COMMIT_POW_BITS,
+        PROOF_FRI_QUERY_POW_BITS,
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    )
 }
 
 fn map_recursion_error(error: VerificationError) -> ProofError {

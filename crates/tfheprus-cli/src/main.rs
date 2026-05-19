@@ -56,7 +56,7 @@ use tfheprus_prover::{
     AggregatedRecursiveActualPbsChainNodeProof, CompactActualPbsChainSummary,
     CompactAggregatedRecursiveActualPbsChainNodeProof, CompactRecursiveActualPbsChainChunkProof,
     CompactRecursiveActualPbsChainNode, RecursiveActualPbsChainChunkProof,
-    RecursiveActualPbsChainNode,
+    RecursiveActualPbsChainNode, RecursiveProofSizeBreakdown,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -2370,6 +2370,7 @@ fn inspect_pbs_chain_artifact_demo(kind: &str, path: &str) -> Result<(), Box<dyn
         }
         "root" => {
             let proof = deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
+            let breakdown = proof.root.size_breakdown()?;
             println!(
                 "pbs-chain artifact inspected: kind=root, artifact={}, artifact_bytes={}, params_n={}, total_steps={}, root_tables={}, root_public_inputs={}, chain_summary_fields={}",
                 path,
@@ -2380,10 +2381,12 @@ fn inspect_pbs_chain_artifact_demo(kind: &str, path: &str) -> Result<(), Box<dyn
                 proof.root.public_input_count(),
                 proof.chain_summary.field_values().len()
             );
+            print_recursive_size_breakdown("root", path, &breakdown);
         }
         "compact-root" => {
             let proof =
                 deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
+            let breakdown = proof.root.size_breakdown()?;
             println!(
                 "pbs-chain artifact inspected: kind=compact-root, artifact={}, artifact_bytes={}, params_n={}, total_steps={}, root_tables={}, root_public_inputs={}, compact_summary_fields={}",
                 path,
@@ -2394,6 +2397,7 @@ fn inspect_pbs_chain_artifact_demo(kind: &str, path: &str) -> Result<(), Box<dyn
                 proof.root.public_input_count(),
                 proof.chain_summary.field_values().len()
             );
+            print_recursive_size_breakdown("compact-root", path, &breakdown);
         }
         "frontier" => {
             let proof = deserialize_aggregated_recursive_actual_pbs_chain_frontier_proof(&bytes)?;
@@ -2418,6 +2422,25 @@ fn inspect_pbs_chain_artifact_demo(kind: &str, path: &str) -> Result<(), Box<dyn
     }
 
     Ok(())
+}
+
+fn print_recursive_size_breakdown(kind: &str, path: &str, breakdown: &RecursiveProofSizeBreakdown) {
+    println!(
+        "pbs-chain recursive size breakdown: kind={}, artifact={}, public_inputs_bytes={}, batch_stark_bytes={}, core_proof_bytes={}, commitments_bytes={}, opened_values_bytes={}, opening_proof_bytes={}, global_lookup_data_bytes={}, degree_bits_bytes={}, primitive_public_values_bytes={}, non_primitives_bytes={}, structural_metadata_bytes={}",
+        kind,
+        path,
+        breakdown.public_inputs_bytes,
+        breakdown.batch_stark_bytes,
+        breakdown.core_proof_bytes,
+        breakdown.commitments_bytes,
+        breakdown.opened_values_bytes,
+        breakdown.opening_proof_bytes,
+        breakdown.global_lookup_data_bytes,
+        breakdown.degree_bits_bytes,
+        breakdown.primitive_public_values_bytes,
+        breakdown.non_primitives_bytes,
+        breakdown.structural_metadata_bytes
+    );
 }
 
 fn bench_pbs_chain_private_recursive_demo(

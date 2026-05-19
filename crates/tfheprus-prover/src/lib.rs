@@ -41,6 +41,12 @@ use tfheprus_circuits::{
 use tfheprus_core::{Goldilocks, Params};
 
 const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
+pub(crate) const PROOF_FRI_LOG_BLOWUP: usize = 4;
+pub(crate) const PROOF_FRI_LOG_FINAL_POLY_LEN: usize = 0;
+pub(crate) const PROOF_FRI_MAX_LOG_ARITY: usize = 3;
+pub(crate) const PROOF_FRI_COMMIT_POW_BITS: usize = 0;
+pub(crate) const PROOF_FRI_QUERY_POW_BITS: usize = 20;
+pub(crate) const PROOF_FRI_NUM_QUERIES: usize = 20;
 
 pub struct PolyMulProof {
     pub degree: usize,
@@ -327,6 +333,21 @@ pub enum RecursiveActualPbsChainNode<'a> {
 pub enum CompactRecursiveActualPbsChainNode<'a> {
     Leaf(&'a CompactRecursiveActualPbsChainChunkProof),
     Aggregate(&'a CompactAggregatedRecursiveActualPbsChainNodeProof),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursiveProofSizeBreakdown {
+    pub public_inputs_bytes: usize,
+    pub batch_stark_bytes: usize,
+    pub core_proof_bytes: usize,
+    pub commitments_bytes: usize,
+    pub opened_values_bytes: usize,
+    pub opening_proof_bytes: usize,
+    pub global_lookup_data_bytes: usize,
+    pub degree_bits_bytes: usize,
+    pub primitive_public_values_bytes: usize,
+    pub non_primitives_bytes: usize,
+    pub structural_metadata_bytes: usize,
 }
 
 impl AggregatedRecursiveActualPbsChainChunkTreeProof {
@@ -1768,7 +1789,7 @@ fn prove_circuit(
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
     let config = goldilocks_config();
-    let table_packing = TablePacking::default();
+    let table_packing = proof_table_packing();
     let range_bit_counts = range_check_bit_counts(circuit);
     let range_preprocessors = range_preprocessors(&range_bit_counts);
     let range_air_builders = range_air_builders(&range_bit_counts);
@@ -1957,11 +1978,23 @@ pub(crate) fn goldilocks_config() -> GoldilocksConfig {
     let val_mmcs = P3Mmcs::new(hash, compress, 0);
     let challenge_mmcs = ExtensionMmcs::<P3Goldilocks, P3Challenge, P3Mmcs>::new(val_mmcs.clone());
     let dft = Radix2DitParallel::default();
-    let fri_params = FriParameters::new_benchmark_high_arity(challenge_mmcs);
+    let fri_params = FriParameters {
+        log_blowup: PROOF_FRI_LOG_BLOWUP,
+        log_final_poly_len: PROOF_FRI_LOG_FINAL_POLY_LEN,
+        max_log_arity: PROOF_FRI_MAX_LOG_ARITY,
+        num_queries: PROOF_FRI_NUM_QUERIES,
+        commit_proof_of_work_bits: PROOF_FRI_COMMIT_POW_BITS,
+        query_proof_of_work_bits: PROOF_FRI_QUERY_POW_BITS,
+        mmcs: challenge_mmcs,
+    };
     let pcs = TwoAdicFriPcs::new(dft, val_mmcs, fri_params);
     let challenger = DuplexChallenger::new(perm);
 
     StarkConfig::new(pcs, challenger)
+}
+
+pub(crate) fn proof_table_packing() -> TablePacking {
+    TablePacking::default().with_fri_params(PROOF_FRI_LOG_FINAL_POLY_LEN, PROOF_FRI_LOG_BLOWUP)
 }
 
 pub(crate) fn goldilocks_poseidon2_8() -> Poseidon2Goldilocks<8> {
