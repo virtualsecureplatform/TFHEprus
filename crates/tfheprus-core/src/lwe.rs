@@ -1,6 +1,7 @@
 use rand::RngCore;
 
 use crate::field::{Goldilocks, GOLDILOCKS_MODULUS};
+use crate::noise::{sample_uniform_bounded_noise, DEFAULT_ENCRYPTION_NOISE_BOUND};
 use crate::params::Params;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,14 +44,31 @@ impl LweCiphertext {
         message: u64,
         rng: &mut R,
     ) -> Self {
+        Self::encrypt_with_noise_bound(params, sk, message, DEFAULT_ENCRYPTION_NOISE_BOUND, rng)
+    }
+
+    pub fn encrypt_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &LweSecretKey,
+        message: u64,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
         let mask = (0..sk.dimension())
             .map(|_| Goldilocks::random(rng))
             .collect::<Vec<_>>();
-        Self::encrypt_with_mask(params, sk, message, mask)
+        let noise = sample_uniform_bounded_noise(noise_bound, rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 
     pub fn encrypt_trivial(params: &Params, sk: &LweSecretKey, message: u64) -> Self {
-        Self::encrypt_with_mask(params, sk, message, vec![Goldilocks::ZERO; sk.dimension()])
+        Self::encrypt_with_mask_and_noise(
+            params,
+            sk,
+            message,
+            vec![Goldilocks::ZERO; sk.dimension()],
+            Goldilocks::ZERO,
+        )
     }
 
     pub fn encrypt_with_mask(
@@ -59,6 +77,28 @@ impl LweCiphertext {
         message: u64,
         mask: Vec<Goldilocks>,
     ) -> Self {
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, Goldilocks::ONE)
+    }
+
+    pub fn encrypt_with_mask_and_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &LweSecretKey,
+        message: u64,
+        mask: Vec<Goldilocks>,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let noise = sample_uniform_bounded_noise(noise_bound, rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
+    }
+
+    pub fn encrypt_with_mask_and_noise(
+        params: &Params,
+        sk: &LweSecretKey,
+        message: u64,
+        mask: Vec<Goldilocks>,
+        noise: Goldilocks,
+    ) -> Self {
         assert_eq!(mask.len(), sk.dimension());
         let encoded = encode_message(params, message);
         let body = mask
@@ -66,7 +106,8 @@ impl LweCiphertext {
             .zip(sk.coeffs())
             .map(|(&a, &s)| a * s)
             .sum::<Goldilocks>()
-            + encoded;
+            + encoded
+            + noise;
         Self { mask, body }
     }
 
@@ -121,6 +162,17 @@ mod tests {
         let sk = LweSecretKey::generate_binary(params.lwe_dimension, &mut rng);
         for message in 0..params.plaintext_modulus {
             let ct = LweCiphertext::encrypt(&params, &sk, message, &mut rng);
+            assert_eq!(ct.decrypt(&params, &sk), message);
+        }
+    }
+
+    #[test]
+    fn lwe_round_trips_messages_with_bounded_noise() {
+        let params = Params::toy();
+        let mut rng = ChaCha20Rng::seed_from_u64(8);
+        let sk = LweSecretKey::generate_binary(params.lwe_dimension, &mut rng);
+        for message in 0..params.plaintext_modulus {
+            let ct = LweCiphertext::encrypt_with_noise_bound(&params, &sk, message, 3, &mut rng);
             assert_eq!(ct.decrypt(&params, &sk), message);
         }
     }

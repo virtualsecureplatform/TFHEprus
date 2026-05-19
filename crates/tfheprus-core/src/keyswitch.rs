@@ -35,6 +35,26 @@ impl GlweKeySwitchKey {
         Self { rows }
     }
 
+    pub fn generate_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        source_key: &GlweSecretKey,
+        target_key: &GlweSecretKey,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        assert_eq!(source_key.dimension(), params.glwe_dimension);
+        assert_eq!(source_key.polynomial_size(), params.polynomial_size);
+        assert_eq!(target_key.polynomial_size(), params.polynomial_size);
+        let rows = source_key
+            .polys()
+            .iter()
+            .map(|poly| {
+                GlevCiphertext::encrypt_with_noise_bound(params, target_key, poly, noise_bound, rng)
+            })
+            .collect();
+        Self { rows }
+    }
+
     pub fn to_ntt(&self) -> GlweKeySwitchKeyNtt {
         GlweKeySwitchKeyNtt {
             rows: self.rows.iter().map(GlevCiphertext::to_ntt).collect(),
@@ -124,7 +144,13 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(202);
         let sk = SecretKey::generate(&params, &mut rng);
         let target_key = trivial_lwe_extraction_key(&params, &sk.input_lwe);
-        let ksk = GlweKeySwitchKey::generate(&params, &sk.glwe, &target_key, &mut rng);
+        let ksk = GlweKeySwitchKey::generate_with_noise_bound(
+            &params,
+            &sk.glwe,
+            &target_key,
+            0,
+            &mut rng,
+        );
         let message = Polynomial::from_coeffs(
             (0..params.polynomial_size)
                 .map(|index| {
@@ -134,7 +160,8 @@ mod tests {
                 })
                 .collect(),
         );
-        let input = GlweCiphertext::encrypt(&params, &sk.glwe, &message, &mut rng);
+        let input =
+            GlweCiphertext::encrypt_with_noise_bound(&params, &sk.glwe, &message, 0, &mut rng);
         let switched = glwe_keyswitch(&params, &ksk, &input);
         assert_eq!(switched.phase(&target_key), input.phase(&sk.glwe));
     }

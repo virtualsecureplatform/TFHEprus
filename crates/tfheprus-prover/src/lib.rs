@@ -35,11 +35,12 @@ use serde::{Deserialize, Serialize};
 use tfheprus_circuits::{
     build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
     build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
-    build_actual_pbs_step_private_circuit, build_glwe_keyswitch_circuit, build_mul_xai_circuit,
-    build_poly_mul_circuit, build_sample_extract_circuit, ActualPbsChainChunkInstance,
-    ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
-    ActualPbsStepPrivateInstance, GlweKeyswitchInstance, MulXaiInstance, PolyMulInstance,
-    SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
+    build_actual_pbs_step_private_circuit, build_glwe_keyswitch_circuit,
+    build_glwe_keyswitch_private_key_digest_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
+    build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
+    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
+    GlweKeyswitchInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::Params;
 
@@ -84,6 +85,12 @@ pub struct SampleExtractProof {
 }
 
 pub struct GlweKeyswitchProof {
+    pub params: Params,
+    pub public_inputs: Vec<P3Goldilocks>,
+    pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
+pub struct GlweKeyswitchPrivateKeyDigestProof {
     pub params: Params,
     pub public_inputs: Vec<P3Goldilocks>,
     pub proof: BatchStarkProof<GoldilocksConfig>,
@@ -660,6 +667,38 @@ pub fn prove_glwe_keyswitch(
     })
 }
 
+pub fn glwe_keyswitch_proof_serialized_len(
+    proof: &GlweKeyswitchProof,
+) -> Result<usize, ProofError> {
+    postcard::to_allocvec(&proof.proof)
+        .map(|bytes| bytes.len())
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn prove_glwe_keyswitch_private_key_digest(
+    instance: &GlweKeyswitchInstance,
+) -> Result<GlweKeyswitchPrivateKeyDigestProof, ProofError> {
+    let circuit = build_glwe_keyswitch_private_key_digest_circuit(instance)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let public_inputs = instance.private_key_digest_public_inputs();
+    let private_inputs = instance.private_key_digest_private_inputs();
+    let proof = prove_circuit(&circuit, &public_inputs, &private_inputs)?;
+
+    Ok(GlweKeyswitchPrivateKeyDigestProof {
+        params: instance.params.clone(),
+        public_inputs,
+        proof,
+    })
+}
+
+pub fn glwe_keyswitch_private_key_digest_proof_serialized_len(
+    proof: &GlweKeyswitchPrivateKeyDigestProof,
+) -> Result<usize, ProofError> {
+    postcard::to_allocvec(&proof.proof)
+        .map(|bytes| bytes.len())
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
 pub fn verify_glwe_keyswitch_proof(
     instance: &GlweKeyswitchInstance,
     proof: &GlweKeyswitchProof,
@@ -671,9 +710,29 @@ pub fn verify_glwe_keyswitch_proof(
     verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
+pub fn verify_glwe_keyswitch_private_key_digest_proof(
+    instance: &GlweKeyswitchInstance,
+    proof: &GlweKeyswitchPrivateKeyDigestProof,
+) -> Result<(), ProofError> {
+    if proof.params != instance.params
+        || proof.public_inputs != instance.private_key_digest_public_inputs()
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    verify_circuit_proof(&proof.proof, &proof.public_inputs)
+}
+
 pub fn prove_and_verify_glwe_keyswitch(instance: &GlweKeyswitchInstance) -> Result<(), ProofError> {
     let proof = prove_glwe_keyswitch(instance)?;
     verify_glwe_keyswitch_proof(instance, &proof)
+}
+
+pub fn prove_and_verify_glwe_keyswitch_private_key_digest(
+    instance: &GlweKeyswitchInstance,
+) -> Result<(), ProofError> {
+    let proof = prove_glwe_keyswitch_private_key_digest(instance)?;
+    verify_glwe_keyswitch_private_key_digest_proof(instance, &proof)
 }
 
 pub fn prove_actual_pbs(instance: &ActualPbsInstance) -> Result<ActualPbsProof, ProofError> {
@@ -2270,6 +2329,24 @@ mod tests {
         let instance = GlweKeyswitchInstance::new(params, input_accumulator, key_switch_key);
 
         prove_and_verify_glwe_keyswitch(&instance).unwrap();
+    }
+
+    #[test]
+    fn proves_and_verifies_glwe_keyswitch_private_key_digest() {
+        let params = Params::toy();
+        let mut rng = ChaCha20Rng::seed_from_u64(281);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let target_key = trivial_lwe_extraction_key(&params, &sk.input_lwe);
+        let key_switch_key = GlweKeySwitchKey::generate(&params, &sk.glwe, &target_key, &mut rng);
+        let message = Polynomial::from_coeffs(
+            (0..params.polynomial_size)
+                .map(|index| Goldilocks::from_u64((index as u64 + 1) * 19))
+                .collect(),
+        );
+        let input_accumulator = GlweCiphertext::encrypt(&params, &sk.glwe, &message, &mut rng);
+        let instance = GlweKeyswitchInstance::new(params, input_accumulator, key_switch_key);
+
+        prove_and_verify_glwe_keyswitch_private_key_digest(&instance).unwrap();
     }
 
     fn sample_extract_instance(mask: [u64; 4], body: [u64; 4]) -> SampleExtractInstance {

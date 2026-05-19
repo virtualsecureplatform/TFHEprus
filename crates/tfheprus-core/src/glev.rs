@@ -31,6 +31,28 @@ impl GlevCiphertext {
         Self { levels }
     }
 
+    pub fn encrypt_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let mut levels = Vec::with_capacity(params.decomposition_level_count);
+        for level_index in 0..params.decomposition_level_count {
+            let gadget = decomposition_gadget_factor(params, level_index);
+            let scaled = message.scale(gadget);
+            levels.push(GlweCiphertext::encrypt_with_noise_bound(
+                params,
+                sk,
+                &scaled,
+                noise_bound,
+                rng,
+            ));
+        }
+        Self { levels }
+    }
+
     pub fn external_product_by_plain_poly(
         &self,
         params: &Params,

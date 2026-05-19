@@ -2,6 +2,7 @@ use rand::RngCore;
 
 use crate::field::Goldilocks;
 use crate::lwe::{LweCiphertext, LweSecretKey};
+use crate::noise::{sample_uniform_bounded_noise_polynomial, DEFAULT_ENCRYPTION_NOISE_BOUND};
 use crate::params::Params;
 use crate::poly::{NttPolynomial, Polynomial};
 
@@ -85,12 +86,24 @@ impl GlweCiphertext {
         message: &Polynomial,
         rng: &mut R,
     ) -> Self {
+        Self::encrypt_with_noise_bound(params, sk, message, DEFAULT_ENCRYPTION_NOISE_BOUND, rng)
+    }
+
+    pub fn encrypt_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
         assert_eq!(message.len(), params.polynomial_size);
         assert_eq!(sk.dimension(), params.glwe_dimension);
         let mask = (0..params.glwe_dimension)
             .map(|_| Polynomial::random(params.polynomial_size, rng))
             .collect::<Vec<_>>();
-        Self::encrypt_with_mask(params, sk, message, mask)
+        let noise =
+            sample_uniform_bounded_noise_polynomial(params.polynomial_size, noise_bound, rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
     }
 
     pub fn encrypt_with_mask(
@@ -99,11 +112,37 @@ impl GlweCiphertext {
         message: &Polynomial,
         mask: Vec<Polynomial>,
     ) -> Self {
+        let noise = Polynomial::from_coeffs(vec![Goldilocks::ONE; params.polynomial_size]);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
+    }
+
+    pub fn encrypt_with_mask_and_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        mask: Vec<Polynomial>,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let noise =
+            sample_uniform_bounded_noise_polynomial(params.polynomial_size, noise_bound, rng);
+        Self::encrypt_with_mask_and_noise(params, sk, message, mask, noise)
+    }
+
+    pub fn encrypt_with_mask_and_noise(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        mask: Vec<Polynomial>,
+        noise: Polynomial,
+    ) -> Self {
         assert_eq!(mask.len(), sk.dimension());
+        assert_eq!(noise.len(), params.polynomial_size);
         let mut body = message.clone();
         for (a, s) in mask.iter().zip(sk.polys()) {
             body = body.add(&a.mul(s));
         }
+        body = body.add(&noise);
         assert_eq!(body.len(), params.polynomial_size);
         Self { mask, body }
     }
@@ -220,8 +259,41 @@ mod tests {
                 .map(|value| Goldilocks::from_u64(value as u64))
                 .collect(),
         );
-        let ct = GlweCiphertext::encrypt(&params, &sk, &msg, &mut rng);
+        let mask = (0..params.glwe_dimension)
+            .map(|_| Polynomial::random(params.polynomial_size, &mut rng))
+            .collect();
+        let ct = GlweCiphertext::encrypt_with_mask_and_noise(
+            &params,
+            &sk,
+            &msg,
+            mask,
+            Polynomial::zero(params.polynomial_size),
+        );
         assert_eq!(ct.phase(&sk), msg);
+    }
+
+    #[test]
+    fn glwe_encrypt_with_bounded_noise_adds_phase_noise() {
+        let params = Params::toy();
+        let mut rng = ChaCha20Rng::seed_from_u64(13);
+        let sk = GlweSecretKey::generate_binary(&params, &mut rng);
+        let msg = Polynomial::from_coeffs(
+            (0..params.polynomial_size)
+                .map(|value| Goldilocks::from_u64(value as u64))
+                .collect(),
+        );
+        let noise = Polynomial::from_coeffs(vec![Goldilocks::ONE; params.polynomial_size]);
+        let mask = (0..params.glwe_dimension)
+            .map(|_| Polynomial::random(params.polynomial_size, &mut rng))
+            .collect();
+        let ct = GlweCiphertext::encrypt_with_mask_and_noise(&params, &sk, &msg, mask, noise);
+        assert_eq!(
+            ct.phase(&sk),
+            msg.add(&Polynomial::from_coeffs(vec![
+                Goldilocks::ONE;
+                params.polynomial_size
+            ]))
+        );
     }
 
     #[test]
@@ -230,7 +302,16 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(12);
         let sk = GlweSecretKey::generate_binary(&params, &mut rng);
         let msg = Polynomial::from_coeffs((10..18).map(Goldilocks::from_u64).collect());
-        let ct = GlweCiphertext::encrypt(&params, &sk, &msg, &mut rng);
+        let mask = (0..params.glwe_dimension)
+            .map(|_| Polynomial::random(params.polynomial_size, &mut rng))
+            .collect();
+        let ct = GlweCiphertext::encrypt_with_mask_and_noise(
+            &params,
+            &sk,
+            &msg,
+            mask,
+            Polynomial::zero(params.polynomial_size),
+        );
         let lwe = sample_extract_index_zero(&ct);
         assert_eq!(lwe.phase(&sk.extracted_lwe_secret_key()), msg[0]);
     }

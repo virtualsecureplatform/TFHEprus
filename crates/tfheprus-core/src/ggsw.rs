@@ -50,6 +50,49 @@ impl GgswCiphertext {
         Self { rows }
     }
 
+    pub fn encrypt_constant_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: Goldilocks,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        Self::encrypt_polynomial_with_noise_bound(
+            params,
+            sk,
+            &Polynomial::constant(params.polynomial_size, message),
+            noise_bound,
+            rng,
+        )
+    }
+
+    pub fn encrypt_polynomial_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &GlweSecretKey,
+        message: &Polynomial,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let mut rows = Vec::with_capacity(params.glwe_dimension + 1);
+        for sk_poly in sk.polys() {
+            rows.push(GlevCiphertext::encrypt_with_noise_bound(
+                params,
+                sk,
+                &message.mul(sk_poly).neg(),
+                noise_bound,
+                rng,
+            ));
+        }
+        rows.push(GlevCiphertext::encrypt_with_noise_bound(
+            params,
+            sk,
+            message,
+            noise_bound,
+            rng,
+        ));
+        Self { rows }
+    }
+
     pub fn to_ntt(&self) -> GgswCiphertextNtt {
         GgswCiphertextNtt {
             rows: self.rows.iter().map(GlevCiphertext::to_ntt).collect(),
@@ -123,11 +166,23 @@ mod tests {
         let sk = GlweSecretKey::generate_binary(&params, &mut rng);
         let msg0 = Polynomial::constant(params.polynomial_size, 3u64.into());
         let msg1 = Polynomial::constant(params.polynomial_size, 9u64.into());
-        let c0 = GlweCiphertext::encrypt(&params, &sk, &msg0, &mut rng);
-        let c1 = GlweCiphertext::encrypt(&params, &sk, &msg1, &mut rng);
+        let c0 = GlweCiphertext::encrypt_with_noise_bound(&params, &sk, &msg0, 0, &mut rng);
+        let c1 = GlweCiphertext::encrypt_with_noise_bound(&params, &sk, &msg1, 0, &mut rng);
 
-        let zero = GgswCiphertext::encrypt_constant(&params, &sk, Goldilocks::ZERO, &mut rng);
-        let one = GgswCiphertext::encrypt_constant(&params, &sk, Goldilocks::ONE, &mut rng);
+        let zero = GgswCiphertext::encrypt_constant_with_noise_bound(
+            &params,
+            &sk,
+            Goldilocks::ZERO,
+            0,
+            &mut rng,
+        );
+        let one = GgswCiphertext::encrypt_constant_with_noise_bound(
+            &params,
+            &sk,
+            Goldilocks::ONE,
+            0,
+            &mut rng,
+        );
 
         assert_eq!(cmux(&params, &c0, &c1, &zero).phase(&sk), msg0);
         assert_eq!(cmux(&params, &c0, &c1, &one).phase(&sk), msg1);

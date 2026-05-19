@@ -10,6 +10,7 @@ pub mod glwe;
 pub mod keys;
 pub mod keyswitch;
 pub mod lwe;
+pub mod noise;
 pub mod ntt;
 pub mod params;
 pub mod pbs;
@@ -30,6 +31,10 @@ pub use keyswitch::{
     GlweKeySwitchKey, GlweKeySwitchKeyNtt,
 };
 pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};
+pub use noise::{
+    sample_uniform_bounded_noise, sample_uniform_bounded_noise_polynomial,
+    DEFAULT_ENCRYPTION_NOISE_BOUND,
+};
 pub use ntt::{
     negacyclic_intt, negacyclic_mul_ntt, negacyclic_ntt, ntt, primitive_power_of_two_root,
     GOLDILOCKS_TWO_ADICITY,

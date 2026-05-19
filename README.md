@@ -19,7 +19,9 @@ enough to mirror in Plonky3 circuits.
 - Goldilocks field arithmetic.
 - Negacyclic polynomial arithmetic in `F_q[X] / (X^N + 1)`, including a
   twisted Goldilocks NTT path.
-- LWE and GLWE encryption/decryption with zero-noise semantics for now.
+- LWE and GLWE encryption/decryption with bounded nonzero noise by default.
+  Exact/noise-zero constructors are kept only for trivial public ciphertexts
+  and algebraic test fixtures.
 - GLev/GGSW structures for exact toy decomposition and native paper-style
   approximate decomposition (`B=2^5, l=4` in `Params::paper_v1()`).
 - External product and CMUX, with coefficient-key and NTT-key variants.
@@ -332,18 +334,23 @@ test for the case where the cap covers the whole opening path.
 The paper-style GLWE key-switch arithmetic is also proven as a standalone
 paper-v1 proof:
 `cargo run --release -p tfheprus-cli -- prove-glwe-keyswitch paper-v1`
-verified with `public_inputs=10969`, `private_inputs=6144`,
-`prove_us=727757`, `verify_us=22152`, and
-`keyswitched_output_message=3`. The combined command
+verified on the noisy default material path with `public_inputs=10969`,
+`private_inputs=6144`, `proof_bytes=1161166`, `prove_us=663204`,
+`verify_us=21753`, and `keyswitched_output_message=3`. The private-KSK digest
+variant
+`cargo run --release -p tfheprus-cli -- bench-glwe-keyswitch-modes paper-v1`
+reduced public inputs to `2781`, but increased proof size to
+`1271075` bytes and was slower in this run (`prove_us=895317`), so the faster
+combined path currently keeps the KSK public. The combined command
 `prove-compact-root-keyswitch
 target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin`
 verifies the compact recursive root, checks the key-switch input accumulator
 against the root output-accumulator digest, proves and verifies the final GLWE
 key switch, and decrypts the final ciphertext under the original input LWE key
 with `key_switch_prove_us=676629`, `key_switch_verify_us=21616`, and
-`keyswitched_output_message=3`. The remaining tightening is to make the
-key-switch key private behind a compact digest if the final statement should
-avoid publishing it.
+`keyswitched_output_message=3`. Regenerate compact root artifacts after changes
+to the default encryption material, because the root digest binds the exact
+noisy ciphertext values.
 
 ## Validation
 

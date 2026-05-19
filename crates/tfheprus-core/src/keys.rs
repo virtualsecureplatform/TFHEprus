@@ -49,6 +49,30 @@ impl EvaluationKey {
         Self { bootstrapping_key }
     }
 
+    pub fn generate_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &SecretKey,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let bootstrapping_key = sk
+            .input_lwe
+            .coeffs()
+            .iter()
+            .map(|&bit| {
+                debug_assert!(bit == Goldilocks::ZERO || bit == Goldilocks::ONE);
+                GgswCiphertext::encrypt_constant_with_noise_bound(
+                    params,
+                    &sk.glwe,
+                    bit,
+                    noise_bound,
+                    rng,
+                )
+            })
+            .collect();
+        Self { bootstrapping_key }
+    }
+
     pub fn bootstrapping_key_hash_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for ggsw in &self.bootstrapping_key {
