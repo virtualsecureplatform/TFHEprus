@@ -11,11 +11,16 @@ use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
     bootstrap_without_keyswitch, decompose_polynomial, decomposition_gadget_factor,
     mod_switch_to_exponent, negacyclic_ntt, primitive_power_of_two_root, sample_extract_index_zero,
-    EvaluationKey, GgswCiphertext, GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext,
-    Params, Polynomial, TestPolynomial, GOLDILOCKS_MODULUS, GOLDILOCKS_TWO_ADICITY,
+    sha3_256_chain_initial, sha3_256_chain_update_fields, EvaluationKey, GgswCiphertext,
+    GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
+    GOLDILOCKS_MODULUS, GOLDILOCKS_TWO_ADICITY, SHA3_256_DIGEST_FIELD_ELEMENTS,
 };
 
 pub const SELECTOR_DIGEST_WIDTH: usize = 4;
+pub const SHA3_DIGEST_WIDTH: usize = SHA3_256_DIGEST_FIELD_ELEMENTS;
+
+const SHA3_PBS_BSK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-bsk-chain";
+const SHA3_PBS_MASK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-mask-chain";
 
 pub const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
 pub const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;
@@ -925,6 +930,32 @@ pub fn pbs_mask_digest_update(
     mask_value: Goldilocks,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
     digest_update_from_values(previous, [mask_value])
+}
+
+pub fn pbs_sha3_bsk_digest_initial() -> [Goldilocks; SHA3_DIGEST_WIDTH] {
+    sha3_256_chain_initial(SHA3_PBS_BSK_CHAIN_DOMAIN)
+}
+
+pub fn pbs_sha3_mask_digest_initial() -> [Goldilocks; SHA3_DIGEST_WIDTH] {
+    sha3_256_chain_initial(SHA3_PBS_MASK_CHAIN_DOMAIN)
+}
+
+pub fn pbs_sha3_bsk_digest_update(
+    previous: [Goldilocks; SHA3_DIGEST_WIDTH],
+    selector: &GgswCiphertext,
+) -> [Goldilocks; SHA3_DIGEST_WIDTH] {
+    sha3_256_chain_update_fields(
+        SHA3_PBS_BSK_CHAIN_DOMAIN,
+        &previous,
+        ggsw_ntt_values(selector),
+    )
+}
+
+pub fn pbs_sha3_mask_digest_update(
+    previous: [Goldilocks; SHA3_DIGEST_WIDTH],
+    mask_value: Goldilocks,
+) -> [Goldilocks; SHA3_DIGEST_WIDTH] {
+    sha3_256_chain_update_fields(SHA3_PBS_MASK_CHAIN_DOMAIN, &previous, [mask_value])
 }
 
 fn append_polynomial_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
@@ -2038,6 +2069,27 @@ mod tests {
             .set_private_inputs(&instance.private_inputs())
             .unwrap();
         runner.run().unwrap();
+    }
+
+    #[test]
+    fn sha3_pbs_digest_chains_bind_selector_and_mask_values() {
+        let params = Params::new(1, 4, 1, 5, 4, 4);
+        let selector = nonzero_ggsw(&params);
+        let other_selector = zero_ggsw(&params);
+        let mask_step = tfheprus_core::GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+
+        let bsk_initial = pbs_sha3_bsk_digest_initial();
+        let bsk_update = pbs_sha3_bsk_digest_update(bsk_initial, &selector);
+        let other_bsk_update = pbs_sha3_bsk_digest_update(bsk_initial, &other_selector);
+        assert_ne!(bsk_update, other_bsk_update);
+
+        let mask_initial = pbs_sha3_mask_digest_initial();
+        let mask_update =
+            pbs_sha3_mask_digest_update(mask_initial, Goldilocks::from_u64(mask_step));
+        let other_mask_update =
+            pbs_sha3_mask_digest_update(mask_initial, Goldilocks::from_u64(mask_step * 2));
+        assert_ne!(mask_update, other_mask_update);
+        assert_eq!(mask_update.len(), SHA3_DIGEST_WIDTH);
     }
 
     fn run_actual_pbs_circuit_with_params(params: Params) {
