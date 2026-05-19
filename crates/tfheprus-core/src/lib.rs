@@ -38,5 +38,5 @@ pub use poly::{NttPolynomial, Polynomial};
 pub use sha3_commit::{
     raw_sha3_256, sha3_256_bytes, sha3_256_chain_initial, sha3_256_chain_update_fields,
     sha3_256_field_element_digest, sha3_256_field_elements, Sha3DigestWords, SHA3_256_DIGEST_BYTES,
-    SHA3_256_DIGEST_FIELD_ELEMENTS, SHA3_256_DIGEST_U32_WORDS,
+    SHA3_256_DIGEST_FIELD_ELEMENTS, SHA3_256_DIGEST_U32_WORDS, SHA3_256_DOMAIN_PREFIX,
 };

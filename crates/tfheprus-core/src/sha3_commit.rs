@@ -6,8 +6,7 @@ use crate::Goldilocks;
 pub const SHA3_256_DIGEST_BYTES: usize = 32;
 pub const SHA3_256_DIGEST_U32_WORDS: usize = 8;
 pub const SHA3_256_DIGEST_FIELD_ELEMENTS: usize = SHA3_256_DIGEST_U32_WORDS;
-
-const DOMAIN_PREFIX: &[u8] = b"TFHEprus-SHA3-256-v1";
+pub const SHA3_256_DOMAIN_PREFIX: &[u8] = b"TFHEprus-SHA3-256-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sha3DigestWords(pub [u32; SHA3_256_DIGEST_U32_WORDS]);
@@ -90,7 +89,7 @@ pub fn sha3_256_chain_update_fields(
 
 fn domain_separated_hasher(domain: &[u8]) -> Sha3_256 {
     let mut hasher = Sha3_256::new();
-    hasher.update(DOMAIN_PREFIX);
+    hasher.update(SHA3_256_DOMAIN_PREFIX);
     hasher.update((domain.len() as u32).to_le_bytes());
     hasher.update(domain);
     hasher
