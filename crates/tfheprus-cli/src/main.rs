@@ -28,6 +28,7 @@ use tfheprus_prover::{
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_mul_xai, prove_poly_mul,
     prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
+    prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_recursive_actual_pbs_chain_chunk, prove_recursive_actual_pbs_chain_chunk,
     prove_sample_extract, serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     serialize_aggregated_recursive_actual_pbs_chain_node_proof,
@@ -39,8 +40,9 @@ use tfheprus_prover::{
     verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof,
     verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof,
     verify_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_recursive_actual_pbs_chain_chunk_statement_proof,
-    verify_sample_extract_proof, ActualPbsChainChunkStatement, ActualPbsChainSummary,
+    verify_poly_mul_proof, verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
+    verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
+    ActualPbsChainChunkStatement, ActualPbsChainSummary,
     AggregatedRecursiveActualPbsChainNodeProof, RecursiveActualPbsChainChunkProof,
     RecursiveActualPbsChainNode,
 };
@@ -94,13 +96,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             parse_chunk_step_count_arg(&args)?,
             parse_chunk_index_arg(&args)?,
             parse_required_arg(&args, 5, "leaf artifact output path")?,
+            false,
         )?,
+        Some("prove-pbs-chain-private-leaf-recursive") => {
+            prove_pbs_chain_leaf_recursive_artifact_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+                parse_chunk_index_arg(&args)?,
+                parse_required_arg(&args, 5, "leaf artifact output path")?,
+                true,
+            )?
+        }
         Some("prove-pbs-chain-leaves-recursive") => {
             prove_pbs_chain_leaves_recursive_artifacts_demo(
                 parse_preset_arg(&args)?,
                 parse_chunk_step_count_arg(&args)?,
                 parse_required_chunk_count_arg(&args)?,
                 parse_required_arg(&args, 5, "leaf artifact output directory")?,
+                false,
+            )?
+        }
+        Some("prove-pbs-chain-private-leaves-recursive") => {
+            prove_pbs_chain_leaves_recursive_artifacts_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+                parse_required_chunk_count_arg(&args)?,
+                parse_required_arg(&args, 5, "leaf artifact output directory")?,
+                true,
             )?
         }
         Some("aggregate-pbs-chain-leaves-recursive") => {
@@ -114,6 +136,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 parse_required_arg(&args, 2, "root artifact output path")?,
                 parse_required_arg(&args, 3, "leaf artifact directory")?,
                 parse_optional_leaf_count_arg(&args)?,
+                false,
+            )?
+        }
+        Some("aggregate-pbs-chain-private-leaf-dir-recursive") => {
+            aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
+                parse_required_arg(&args, 2, "root artifact output path")?,
+                parse_required_arg(&args, 3, "leaf artifact directory")?,
+                parse_optional_leaf_count_arg(&args)?,
+                true,
             )?
         }
         Some("package-pbs-chain-frontier-recursive") => {
@@ -980,6 +1011,7 @@ fn prove_pbs_chain_leaf_recursive_artifact_demo(
     chunk_step_count: usize,
     chunk_index: usize,
     output_path: &str,
+    private_recursive: bool,
 ) -> Result<(), Box<dyn Error>> {
     let instance_started = Instant::now();
     let (chunk_start, chunk_end, instance) =
@@ -989,19 +1021,24 @@ fn prove_pbs_chain_leaf_recursive_artifact_demo(
     let statement = ActualPbsChainChunkStatement::from_instance(&instance);
 
     let prove_started = Instant::now();
-    let proof = prove_recursive_actual_pbs_chain_chunk(&instance)?;
+    let proof = if private_recursive {
+        prove_private_recursive_actual_pbs_chain_chunk(&instance)?
+    } else {
+        prove_recursive_actual_pbs_chain_chunk(&instance)?
+    };
     let prove_time = prove_started.elapsed();
 
     let verify_started = Instant::now();
-    verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof)?;
+    verify_recursive_actual_pbs_chain_artifact_statement(&statement, &proof, private_recursive)?;
     let verify_time = verify_started.elapsed();
 
     let artifact = serialize_recursive_actual_pbs_chain_chunk_proof(&proof)?;
     fs::write(output_path, &artifact)?;
 
     println!(
-        "pbs-chain recursive leaf artifact written: preset={}, chunk_steps={}, chunk_index={}, steps={}..{}, artifact={}, artifact_bytes={}, instance_ms={}, instance_us={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}, chain_summary_fields={}",
+        "pbs-chain recursive leaf artifact written: preset={}, private_recursive={}, chunk_steps={}, chunk_index={}, steps={}..{}, artifact={}, artifact_bytes={}, instance_ms={}, instance_us={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}, chain_summary_fields={}",
         preset.name(),
+        private_recursive,
         chunk_step_count,
         chunk_index,
         chunk_start,
@@ -1022,11 +1059,24 @@ fn prove_pbs_chain_leaf_recursive_artifact_demo(
     Ok(())
 }
 
+fn verify_recursive_actual_pbs_chain_artifact_statement(
+    statement: &ActualPbsChainChunkStatement,
+    proof: &RecursiveActualPbsChainChunkProof,
+    private_recursive: bool,
+) -> Result<(), tfheprus_prover::ProofError> {
+    if private_recursive {
+        verify_private_recursive_actual_pbs_chain_chunk_statement_proof(statement, proof)
+    } else {
+        verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, proof)
+    }
+}
+
 fn prove_pbs_chain_leaves_recursive_artifacts_demo(
     preset: ParamPreset,
     chunk_step_count: usize,
     chunk_count: usize,
     output_dir: &str,
+    private_recursive: bool,
 ) -> Result<(), Box<dyn Error>> {
     if chunk_count < 2 {
         return Err("chunk count must be at least 2".into());
@@ -1081,14 +1131,17 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
             let bytes = fs::read(&artifact_path)?;
             let proof = deserialize_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
             let verify_started = Instant::now();
-            verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof).map_err(
-                |error| {
-                    format!(
-                        "existing leaf artifact {} failed verification: {error}",
-                        artifact_path.display()
-                    )
-                },
-            )?;
+            verify_recursive_actual_pbs_chain_artifact_statement(
+                &statement,
+                &proof,
+                private_recursive,
+            )
+            .map_err(|error| {
+                format!(
+                    "existing leaf artifact {} failed verification: {error}",
+                    artifact_path.display()
+                )
+            })?;
             (
                 proof,
                 bytes.len(),
@@ -1098,10 +1151,18 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
             )
         } else {
             let prove_started = Instant::now();
-            let proof = prove_recursive_actual_pbs_chain_chunk(&instance)?;
+            let proof = if private_recursive {
+                prove_private_recursive_actual_pbs_chain_chunk(&instance)?
+            } else {
+                prove_recursive_actual_pbs_chain_chunk(&instance)?
+            };
             let prove_time = prove_started.elapsed();
             let verify_started = Instant::now();
-            verify_recursive_actual_pbs_chain_chunk_statement_proof(&statement, &proof)?;
+            verify_recursive_actual_pbs_chain_artifact_statement(
+                &statement,
+                &proof,
+                private_recursive,
+            )?;
             let verify_time = verify_started.elapsed();
             let artifact = serialize_recursive_actual_pbs_chain_chunk_proof(&proof)?;
             fs::write(&artifact_path, &artifact)?;
@@ -1124,8 +1185,9 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
         mask_digest = instance.mask_digest_out;
 
         println!(
-            "pbs-chain recursive leaf artifact {action}: preset={}, chunk={}, steps={}..{}, artifact={}, artifact_bytes={}, prove_us={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}",
+            "pbs-chain recursive leaf artifact {action}: preset={}, private_recursive={}, chunk={}, steps={}..{}, artifact={}, artifact_bytes={}, prove_us={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}",
             preset.name(),
+            private_recursive,
             chunk_index,
             chunk_start,
             chunk_end,
@@ -1151,8 +1213,9 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
     }
 
     println!(
-        "pbs-chain recursive leaf artifacts ready: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, output_dir={}, written={}, reused={}, total_artifact_bytes={}, total_prove_ms={}, total_prove_us={}, total_verify_ms={}, total_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        "pbs-chain recursive leaf artifacts ready: preset={}, private_recursive={}, chunk_steps={}, chunk_count={}, total_steps={}, output_dir={}, written={}, reused={}, total_artifact_bytes={}, total_prove_ms={}, total_prove_us={}, total_verify_ms={}, total_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
         preset.name(),
+        private_recursive,
         chunk_step_count,
         chunk_count,
         total_steps,
@@ -1286,13 +1349,19 @@ fn aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
     output_path: &str,
     leaf_dir: &str,
     leaf_count: Option<usize>,
+    private_recursive: bool,
 ) -> Result<(), Box<dyn Error>> {
     let leaf_paths = leaf_artifact_paths_from_dir(leaf_dir, leaf_count)?;
-    let checkpoint_dir = Path::new(leaf_dir).join("aggregation");
+    let checkpoint_dir = if private_recursive {
+        Path::new(leaf_dir).join("private-aggregation")
+    } else {
+        Path::new(leaf_dir).join("aggregation")
+    };
     aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
         output_path,
         leaf_paths,
         &checkpoint_dir,
+        private_recursive,
     )
 }
 
@@ -1335,6 +1404,7 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
     output_path: &str,
     leaf_paths: Vec<String>,
     checkpoint_dir: &Path,
+    private_recursive: bool,
 ) -> Result<(), Box<dyn Error>> {
     if leaf_paths.len() < 2 {
         return Err("at least two leaf artifacts are required".into());
@@ -1419,10 +1489,17 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
                     return Err("node summary changed while aggregating checkpoints".into());
                 }
                 let aggregate_started = Instant::now();
-                let proof = prove_aggregated_recursive_actual_pbs_chain_node_pair(
-                    left.as_prover_node(),
-                    right.as_prover_node(),
-                )?;
+                let proof = if private_recursive {
+                    prove_private_aggregated_recursive_actual_pbs_chain_node_pair(
+                        left.as_prover_node(),
+                        right.as_prover_node(),
+                    )?
+                } else {
+                    prove_aggregated_recursive_actual_pbs_chain_node_pair(
+                        left.as_prover_node(),
+                        right.as_prover_node(),
+                    )?
+                };
                 let aggregate_time = aggregate_started.elapsed();
                 total_aggregate_time += aggregate_time;
                 if proof.chain_summary != expected_summary {
@@ -1504,8 +1581,9 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "pbs-chain leaf artifacts checkpoint-aggregated: output={}, checkpoint_dir={}, leaves={}, layers={}, layer_sizes=[{}], aggregation_nodes={}, written={}, reused={}, root_tables={}, root_public_inputs={}, chain_summary_fields={}",
+        "pbs-chain leaf artifacts checkpoint-aggregated: output={}, private_recursive={}, checkpoint_dir={}, leaves={}, layers={}, layer_sizes=[{}], aggregation_nodes={}, written={}, reused={}, root_tables={}, root_public_inputs={}, chain_summary_fields={}",
         output_path,
+        private_recursive,
         checkpoint_dir.display(),
         leaf_count,
         layer_index,
@@ -2116,7 +2194,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
