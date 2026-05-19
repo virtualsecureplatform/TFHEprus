@@ -1,6 +1,7 @@
 //! Plonky3-backed prove/verify proof-of-concept entry points.
 
 mod keccak;
+mod poseidon_chain;
 mod range_check;
 mod recursive;
 
@@ -18,7 +19,7 @@ use p3_circuit_prover::{
 };
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -34,12 +35,11 @@ use tfheprus_circuits::{
     build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
     build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
     build_actual_pbs_step_private_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
-    build_sample_extract_circuit, digest_initial_state, digest_update_from_values,
-    ActualPbsChainChunkInstance, ActualPbsInstance, ActualPbsStepChainInstance,
-    ActualPbsStepInstance, ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance,
-    SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
+    build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
+    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
 };
-use tfheprus_core::{Goldilocks, Params};
+use tfheprus_core::Params;
 
 pub use keccak::{
     prove_and_verify_keccak_f1600, prove_keccak_f1600, verify_keccak_f1600, KeccakF1600Proof,
@@ -1763,13 +1763,7 @@ fn compact_public_view<'a>(
 }
 
 fn compact_accumulator_digest(values: &[P3Goldilocks]) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    let digest = digest_update_from_values(
-        digest_initial_state(COMPACT_ACCUMULATOR_DIGEST_TAG),
-        values
-            .iter()
-            .map(|value| Goldilocks::new_canonical(value.as_canonical_u64())),
-    );
-    digest.map(|value| P3Goldilocks::from_u64(value.value()))
+    poseidon_chain::poseidon2_digest_fields(COMPACT_ACCUMULATOR_DIGEST_TAG, values.iter().copied())
 }
 
 #[derive(Clone, Copy)]

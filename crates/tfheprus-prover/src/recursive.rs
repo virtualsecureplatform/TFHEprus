@@ -26,19 +26,14 @@ use p3_recursion::verifier::{
     verify_p3_batch_proof_circuit, verify_p3_batch_proof_circuit_private_inputs, VerificationError,
 };
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use tfheprus_circuits::{
-    digest_initial_state, selector_digest_absorb_coeff, selector_digest_round_const,
-    SELECTOR_DIGEST_CHUNK_SIZE, SELECTOR_DIGEST_MDS, SELECTOR_DIGEST_MIX_ROUNDS,
-    SELECTOR_DIGEST_WIDTH,
-};
-use tfheprus_core::Goldilocks;
+use tfheprus_circuits::SELECTOR_DIGEST_WIDTH;
 
 use crate::range_check::{
     proof_range_check_bit_counts, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use crate::{
-    base_goldilocks_config, goldilocks_config, goldilocks_poseidon2_8, proof_table_packing,
-    ProofError, RecursiveProofSizeBreakdown, BASE_PROOF_FRI_COMMIT_POW_BITS,
+    base_goldilocks_config, goldilocks_config, goldilocks_poseidon2_8, poseidon_chain,
+    proof_table_packing, ProofError, RecursiveProofSizeBreakdown, BASE_PROOF_FRI_COMMIT_POW_BITS,
     BASE_PROOF_FRI_LOG_BLOWUP, BASE_PROOF_FRI_LOG_FINAL_POLY_LEN, BASE_PROOF_FRI_QUERY_POW_BITS,
     PROOF_FRI_COMMIT_POW_BITS, PROOF_FRI_LOG_BLOWUP, PROOF_FRI_LOG_FINAL_POLY_LEN,
     PROOF_FRI_QUERY_POW_BITS,
@@ -996,16 +991,18 @@ fn constrain_compact_leaf_summary(
         chunk_public_targets.len(),
     )?;
 
-    let input_digest = digest_targets_from_values(
+    let input_digest = poseidon_chain::poseidon2_digest_targets_from_base_targets(
         builder,
         COMPACT_ACCUMULATOR_DIGEST_TAG,
         chunk_public_targets[input_accumulator].iter().copied(),
-    );
-    let output_digest = digest_targets_from_values(
+    )
+    .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let output_digest = poseidon_chain::poseidon2_digest_targets_from_base_targets(
         builder,
         COMPACT_ACCUMULATOR_DIGEST_TAG,
         chunk_public_targets[output_accumulator].iter().copied(),
-    );
+    )
+    .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     connect_summary_range_to_digest(
         builder,
@@ -1324,94 +1321,6 @@ fn summary_range_to_chunk_range(
         return Err(ProofError::StatementMismatch);
     }
     Ok(start..end)
-}
-
-fn digest_targets_from_values(
-    builder: &mut CircuitBuilder<Challenge>,
-    tag: u64,
-    values: impl IntoIterator<Item = ExprId>,
-) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
-    let initial_state = digest_initial_state(tag);
-    let mut state =
-        core::array::from_fn(|lane| builder.define_const(challenge_from_core(initial_state[lane])));
-    let mut count = 0usize;
-
-    for value in values {
-        selector_digest_absorb_target(builder, &mut state, count, value);
-        count += 1;
-        if count.is_multiple_of(SELECTOR_DIGEST_CHUNK_SIZE) {
-            selector_digest_mix_targets(builder, &mut state, count);
-        }
-    }
-
-    let count_const = builder.define_const(Challenge::from(F::from_u64(count as u64)));
-    state[0] = builder.add(state[0], count_const);
-    selector_digest_mix_targets(builder, &mut state, count);
-    state
-}
-
-fn selector_digest_absorb_target(
-    builder: &mut CircuitBuilder<Challenge>,
-    state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
-    index: usize,
-    value: ExprId,
-) {
-    let lane = index % SELECTOR_DIGEST_WIDTH;
-    let term = mul_core_const_target(builder, value, selector_digest_absorb_coeff(index, lane));
-    state[lane] = builder.add(state[lane], term);
-}
-
-fn selector_digest_mix_targets(
-    builder: &mut CircuitBuilder<Challenge>,
-    state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
-    domain: usize,
-) {
-    for round in 0..SELECTOR_DIGEST_MIX_ROUNDS {
-        let powered = core::array::from_fn(|lane| {
-            let round_const = builder.define_const(challenge_from_core(
-                selector_digest_round_const(domain, round, lane),
-            ));
-            let shifted = builder.add(state[lane], round_const);
-            pow7_target(builder, shifted)
-        });
-        *state = selector_digest_mds_targets(builder, &powered);
-    }
-}
-
-fn selector_digest_mds_targets(
-    builder: &mut CircuitBuilder<Challenge>,
-    values: &[ExprId; SELECTOR_DIGEST_WIDTH],
-) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
-    core::array::from_fn(|row| {
-        let zero = builder.define_const(Challenge::from(F::ZERO));
-        values
-            .iter()
-            .zip(SELECTOR_DIGEST_MDS[row].iter())
-            .fold(zero, |acc, (&value, &coeff)| {
-                let term = mul_core_const_target(builder, value, Goldilocks::from_u64(coeff));
-                builder.add(acc, term)
-            })
-    })
-}
-
-fn pow7_target(builder: &mut CircuitBuilder<Challenge>, value: ExprId) -> ExprId {
-    let squared = builder.mul(value, value);
-    let fourth = builder.mul(squared, squared);
-    let sixth = builder.mul(fourth, squared);
-    builder.mul(sixth, value)
-}
-
-fn mul_core_const_target(
-    builder: &mut CircuitBuilder<Challenge>,
-    value: ExprId,
-    coeff: Goldilocks,
-) -> ExprId {
-    let coeff = builder.define_const(challenge_from_core(coeff));
-    builder.mul(value, coeff)
-}
-
-fn challenge_from_core(value: Goldilocks) -> Challenge {
-    Challenge::from(F::from_u64(value.value()))
 }
 
 fn assert_equal(builder: &mut CircuitBuilder<Challenge>, left: ExprId, right: ExprId) {
