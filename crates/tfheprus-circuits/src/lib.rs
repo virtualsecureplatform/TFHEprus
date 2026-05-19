@@ -14,9 +14,10 @@ use range_check::{range_check_expr, register_range_check_npo};
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
     bootstrap_without_keyswitch, decompose_polynomial, decomposition_gadget_factor,
-    mod_switch_to_exponent, negacyclic_ntt, primitive_power_of_two_root, sample_extract_index_zero,
-    sha3_256_chain_initial, sha3_256_chain_update_fields, EvaluationKey, GgswCiphertext,
-    GlevCiphertext, GlweCiphertext, Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
+    extract_trivial_lwe_prefix, glwe_keyswitch_ntt, mod_switch_to_exponent, negacyclic_ntt,
+    primitive_power_of_two_root, sample_extract_index_zero, sha3_256_chain_initial,
+    sha3_256_chain_update_fields, EvaluationKey, GgswCiphertext, GlevCiphertext, GlweCiphertext,
+    GlweKeySwitchKey, Goldilocks, LweCiphertext, Params, Polynomial, TestPolynomial,
     GOLDILOCKS_MODULUS, GOLDILOCKS_TWO_ADICITY, SHA3_256_DIGEST_FIELD_ELEMENTS,
 };
 
@@ -55,6 +56,11 @@ struct GlevNttExpr {
 
 #[derive(Clone)]
 struct GgswNttExpr {
+    rows: Vec<GlevNttExpr>,
+}
+
+#[derive(Clone)]
+struct GlweKeySwitchKeyNttExpr {
     rows: Vec<GlevNttExpr>,
 }
 
@@ -148,6 +154,51 @@ impl SampleExtractInstance {
         inputs.extend(self.glwe.body.coeffs().iter().copied().map(core_to_p3));
         inputs.extend(self.lwe.mask.iter().copied().map(core_to_p3));
         inputs.push(core_to_p3(self.lwe.body));
+        inputs
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlweKeyswitchInstance {
+    pub params: Params,
+    pub input_accumulator: GlweCiphertext,
+    pub key_switch_key: GlweKeySwitchKey,
+    pub output: LweCiphertext,
+}
+
+impl GlweKeyswitchInstance {
+    pub fn new(
+        params: Params,
+        input_accumulator: GlweCiphertext,
+        key_switch_key: GlweKeySwitchKey,
+    ) -> Self {
+        assert_eq!(input_accumulator.mask.len(), params.glwe_dimension);
+        assert_eq!(input_accumulator.body.len(), params.polynomial_size);
+        assert_eq!(key_switch_key.rows.len(), params.glwe_dimension);
+        let switched = glwe_keyswitch_ntt(&params, &key_switch_key.to_ntt(), &input_accumulator);
+        let output = extract_trivial_lwe_prefix(&switched, params.lwe_dimension);
+        Self {
+            params,
+            input_accumulator,
+            key_switch_key,
+            output,
+        }
+    }
+
+    pub fn public_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        append_glwe_public_inputs(&mut inputs, &self.input_accumulator);
+        append_glwe_keyswitch_key_ntt_public_inputs(&mut inputs, &self.key_switch_key);
+        inputs.extend(self.output.mask.iter().copied().map(core_to_p3));
+        inputs.push(core_to_p3(self.output.body));
+        inputs
+    }
+
+    pub fn private_inputs(&self) -> Vec<P3Goldilocks> {
+        let mut inputs = Vec::new();
+        for poly in &self.input_accumulator.mask {
+            append_decomposition_private_inputs(&self.params, poly, &mut inputs);
+        }
         inputs
     }
 }
@@ -681,6 +732,46 @@ pub fn build_sample_extract_circuit(
     Ok(builder.build()?)
 }
 
+pub fn build_glwe_keyswitch_circuit(
+    instance: &GlweKeyswitchInstance,
+) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+    assert_eq!(instance.params.glwe_dimension, 1);
+    assert!(instance.params.lwe_dimension <= instance.params.polynomial_size);
+    assert_eq!(
+        instance.input_accumulator.mask.len(),
+        instance.params.glwe_dimension
+    );
+    assert_eq!(
+        instance.key_switch_key.rows.len(),
+        instance.params.glwe_dimension
+    );
+    assert_eq!(instance.output.mask.len(), instance.params.lwe_dimension);
+
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
+    if let Some(error_bits) = decomposition_error_bits(&instance.params) {
+        register_range_check_npo(&mut builder, error_bits);
+    }
+
+    let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
+    let key_switch_key = alloc_public_glwe_keyswitch_key_ntt(&mut builder, &instance.params);
+    let output_mask = builder.alloc_public_inputs(
+        instance.params.lwe_dimension,
+        "glwe_keyswitch_output_lwe_mask",
+    );
+    let output_body = builder.alloc_public_inputs(1, "glwe_keyswitch_output_lwe_body");
+
+    let switched = glwe_keyswitch_expr(
+        &mut builder,
+        &instance.params,
+        &key_switch_key,
+        &input_accumulator,
+    );
+    connect_trivial_lwe_prefix(&mut builder, &switched, &output_mask, output_body[0]);
+
+    Ok(builder.build()?)
+}
+
 pub fn build_actual_pbs_circuit(
     instance: &ActualPbsInstance,
 ) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
@@ -1052,6 +1143,15 @@ fn append_glev_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GlevCipher
     }
 }
 
+fn append_glwe_keyswitch_key_ntt_public_inputs(
+    inputs: &mut Vec<P3Goldilocks>,
+    ksk: &GlweKeySwitchKey,
+) {
+    for row in &ksk.rows {
+        append_glev_ntt_public_inputs(inputs, row);
+    }
+}
+
 fn append_ggsw_ntt_public_inputs(inputs: &mut Vec<P3Goldilocks>, ct: &GgswCiphertext) {
     for row in &ct.rows {
         append_glev_ntt_public_inputs(inputs, row);
@@ -1250,6 +1350,16 @@ fn alloc_public_ggsw_ntt(
     GgswNttExpr { rows }
 }
 
+fn alloc_public_glwe_keyswitch_key_ntt(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+) -> GlweKeySwitchKeyNttExpr {
+    let rows = (0..params.glwe_dimension)
+        .map(|_| alloc_public_glev_ntt(builder, params))
+        .collect();
+    GlweKeySwitchKeyNttExpr { rows }
+}
+
 fn alloc_private_ggsw_ntt(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     params: &Params,
@@ -1331,6 +1441,20 @@ fn connect_sample_extract(
             let negated = sub_from_zero(builder, poly[degree - i]);
             builder.connect(negated, output_mask[offset + i]);
         }
+    }
+    builder.connect(ct.body[0], output_body);
+}
+
+fn connect_trivial_lwe_prefix(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    ct: &GlweExpr,
+    output_mask: &[ExprId],
+    output_body: ExprId,
+) {
+    assert_eq!(ct.mask.len(), 1);
+    assert!(output_mask.len() <= ct.body.len());
+    for (&actual, &expected) in ct.mask[0].iter().zip(output_mask.iter()) {
+        builder.connect(actual, expected);
     }
     builder.connect(ct.body[0], output_body);
 }
@@ -1527,6 +1651,26 @@ fn external_product_expr(
         &ct.body,
     );
     glwe_add_expr(builder, &acc, &body_product)
+}
+
+fn glwe_keyswitch_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    params: &Params,
+    ksk: &GlweKeySwitchKeyNttExpr,
+    ct: &GlweExpr,
+) -> GlweExpr {
+    let mut acc = GlweExpr {
+        mask: vec![vec![
+            builder.define_const(P3Goldilocks::ZERO);
+            params.polynomial_size
+        ]],
+        body: ct.body.clone(),
+    };
+    for (mask_poly, row) in ct.mask.iter().zip(ksk.rows.iter()) {
+        let product = glev_external_product_by_plain_poly_expr(builder, params, row, mask_poly);
+        acc = glwe_sub_expr(builder, &acc, &product);
+    }
+    acc
 }
 
 fn glev_external_product_by_plain_poly_expr(
@@ -2028,6 +2172,45 @@ mod tests {
             build_sample_extract_circuit(instance.glwe_dimension(), instance.degree()).unwrap();
         let mut runner = circuit.runner();
         runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner.run().unwrap();
+    }
+
+    #[test]
+    fn glwe_keyswitch_circuit_runs_against_native_instance() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let input_accumulator = GlweCiphertext {
+            mask: vec![Polynomial::from_coeffs(vec![
+                3u64.into(),
+                5u64.into(),
+                7u64.into(),
+                11u64.into(),
+            ])],
+            body: Polynomial::from_coeffs(vec![
+                13u64.into(),
+                17u64.into(),
+                19u64.into(),
+                23u64.into(),
+            ]),
+        };
+        let key_switch_key = GlweKeySwitchKey {
+            rows: vec![nonzero_glev(&params, 0)],
+        };
+        let instance =
+            GlweKeyswitchInstance::new(params.clone(), input_accumulator, key_switch_key);
+        assert_eq!(
+            instance.public_inputs().len(),
+            2 * params.polynomial_size
+                + params.decomposition_level_count * 2 * params.polynomial_size
+                + params.lwe_dimension
+                + 1
+        );
+
+        let circuit = build_glwe_keyswitch_circuit(&instance).unwrap();
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        runner
+            .set_private_inputs(&instance.private_inputs())
+            .unwrap();
         runner.run().unwrap();
     }
 

@@ -14,8 +14,9 @@ use tfheprus_circuits::{
     sha3_circuit::{sha3_256_chain_update_fields_expr, sha3_256_field_elements_expr},
     ActualPbsChainChunkInstance, ActualPbsCircuitProfile, ActualPbsInstance,
     ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
-    SHA3_DIGEST_WIDTH, SHA3_PBS_BSK_CHAIN_DOMAIN, SHA3_PBS_MASK_CHAIN_DOMAIN,
+    GlweKeyswitchInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
+    SELECTOR_DIGEST_WIDTH, SHA3_DIGEST_WIDTH, SHA3_PBS_BSK_CHAIN_DOMAIN,
+    SHA3_PBS_MASK_CHAIN_DOMAIN,
 };
 use tfheprus_core::{
     blind_rotate_ntt, bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt,
@@ -37,7 +38,8 @@ use tfheprus_prover::{
     prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_and_verify_keccak_f1600,
-    prove_mul_xai, prove_poly_mul, prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
+    prove_glwe_keyswitch, prove_mul_xai, prove_poly_mul,
+    prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_compact_recursive_actual_pbs_chain_chunk,
@@ -55,8 +57,9 @@ use tfheprus_prover::{
     verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof,
     verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof,
     verify_aggregated_recursive_actual_pbs_chain_root_summary_proof,
-    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof,
+    verify_glwe_keyswitch_proof, verify_mul_xai_proof, verify_poly_mul_proof,
+    verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
     ActualPbsChainChunkStatement, ActualPbsChainSummary,
@@ -73,6 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-poly-mul") => prove_poly_mul_demo()?,
         Some("prove-mul-xai") => prove_mul_xai_demo()?,
         Some("prove-sample-extract") => prove_sample_extract_demo()?,
+        Some("prove-glwe-keyswitch") => prove_glwe_keyswitch_demo(parse_preset_arg(&args)?)?,
         Some("prove-keccak-f1600") => prove_keccak_f1600_demo()?,
         Some("prove-actual-pbs") => prove_actual_pbs_demo(parse_prove_preset_arg(&args)?)?,
         Some("prove-pbs-step") => prove_pbs_step_demo(parse_preset_arg(&args)?)?,
@@ -334,6 +338,42 @@ fn prove_sample_extract_demo() -> Result<(), Box<dyn Error>> {
     );
     println!("lwe_mask={}", format_coefficients(&instance.lwe.mask));
     println!("lwe_body={}", instance.lwe.body.value());
+
+    Ok(())
+}
+
+fn prove_glwe_keyswitch_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    let mut rng = ChaCha20Rng::seed_from_u64(301);
+    let sk = SecretKey::generate(&params, &mut rng);
+    let evaluation_key = EvaluationKey::generate(&params, &sk, &mut rng);
+    let (input, test_polynomial) = actual_pbs_input(&params, &sk);
+    let evaluation_key_ntt = evaluation_key.to_ntt();
+    let accumulator = blind_rotate_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+    let output_key = trivial_lwe_extraction_key(&params, &sk.input_lwe);
+    let key_switch_key = GlweKeySwitchKey::generate(&params, &sk.glwe, &output_key, &mut rng);
+    let instance = GlweKeyswitchInstance::new(params.clone(), accumulator, key_switch_key);
+
+    let prove_started = Instant::now();
+    let proof = prove_glwe_keyswitch(&instance)?;
+    let prove_time = prove_started.elapsed();
+    let verify_started = Instant::now();
+    verify_glwe_keyswitch_proof(&instance, &proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "glwe-keyswitch proof verified: preset={}, lwe_dimension={}, degree={}, public_inputs={}, private_inputs={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, keyswitched_output_message={}",
+        preset.name(),
+        params.lwe_dimension,
+        params.polynomial_size,
+        proof.public_inputs.len(),
+        instance.private_inputs().len(),
+        prove_time.as_millis(),
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros(),
+        instance.output.decrypt(&params, &sk.input_lwe)
+    );
 
     Ok(())
 }
@@ -3269,7 +3309,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 

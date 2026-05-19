@@ -100,6 +100,7 @@ key derived from `SecretKey::input_lwe`.
 cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
+cargo run --release -p tfheprus-cli -- prove-glwe-keyswitch paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
@@ -325,10 +326,17 @@ The run reported `total_prove_us=2632942941`, `aggregate_us=158063586`,
 `aggregate_artifact_bytes=16124081`, and `root_artifact_bytes=179144`.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
-test for the case where the cap covers the whole opening path. The remaining
-proof gap is including the final GLWE key switch in the recursive statement;
-the native key-switch path already decrypts the paper-v1 output under the
-original input LWE key.
+test for the case where the cap covers the whole opening path.
+
+The paper-style GLWE key-switch arithmetic is also proven as a standalone
+paper-v1 proof:
+`cargo run --release -p tfheprus-cli -- prove-glwe-keyswitch paper-v1`
+verified with `public_inputs=10969`, `private_inputs=6144`,
+`prove_us=723138`, `verify_us=21590`, and
+`keyswitched_output_message=3`. The remaining proof-integration gap is to
+stitch that final key-switch proof to the compact recursive PBS root artifact by
+the output-accumulator digest, and to make the key-switch key private behind a
+compact digest if the final statement should avoid publishing it.
 
 ## Validation
 
