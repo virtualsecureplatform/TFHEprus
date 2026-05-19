@@ -675,6 +675,24 @@ pub fn prove_recursive_actual_pbs_chain_chunk(
     })
 }
 
+pub fn prove_private_recursive_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<RecursiveActualPbsChainChunkProof, ProofError> {
+    let base = prove_actual_pbs_chain_chunk(instance)?;
+    let chain_summary = ActualPbsChainSummary::from_chunk_statement(&base.public_statement())?;
+    let recursion = recursive::prove_private_recursive_batch_with_leaf_summary(
+        &base.proof,
+        &chain_summary.field_values(),
+        chain_summary_header_len(),
+    )?;
+
+    Ok(RecursiveActualPbsChainChunkProof {
+        base,
+        recursion,
+        chain_summary,
+    })
+}
+
 pub fn verify_recursive_actual_pbs_chain_chunk_proof(
     instance: &ActualPbsChainChunkInstance,
     proof: &RecursiveActualPbsChainChunkProof,
@@ -695,6 +713,21 @@ pub fn verify_recursive_actual_pbs_chain_chunk_statement_proof(
     }
     recursive::verify_recursive_batch_with_leaf_summary_for_base(
         &proof.base.proof,
+        &proof.chain_summary.field_values(),
+        &proof.recursion,
+    )
+}
+
+pub fn verify_private_recursive_actual_pbs_chain_chunk_statement_proof(
+    statement: &ActualPbsChainChunkStatement,
+    proof: &RecursiveActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    verify_actual_pbs_chain_chunk_statement_proof(statement, &proof.base)?;
+    let expected_summary = ActualPbsChainSummary::from_chunk_statement(statement)?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_recursive_batch_with_private_leaf_summary(
         &proof.chain_summary.field_values(),
         &proof.recursion,
     )
@@ -754,6 +787,25 @@ pub fn prove_aggregated_recursive_actual_pbs_chain_node_pair(
     let chain_summary =
         ActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
     let aggregation = recursive::prove_aggregate_batch_proofs_with_chain_summary(
+        left.batch_proof(),
+        right.batch_proof(),
+        &chain_summary.field_values(),
+        Some(&chain_summary_layout(&chain_summary.params)),
+    )?;
+
+    Ok(AggregatedRecursiveActualPbsChainNodeProof {
+        chain_summary,
+        aggregation,
+    })
+}
+
+pub fn prove_private_aggregated_recursive_actual_pbs_chain_node_pair(
+    left: RecursiveActualPbsChainNode<'_>,
+    right: RecursiveActualPbsChainNode<'_>,
+) -> Result<AggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let chain_summary =
+        ActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    let aggregation = recursive::prove_private_aggregate_batch_proofs_with_chain_summary(
         left.batch_proof(),
         right.batch_proof(),
         &chain_summary.field_values(),
@@ -880,6 +932,74 @@ pub fn prove_aggregated_recursive_actual_pbs_chain_chunk_tree(
                 &chain_summary.field_values(),
                 Some(&chain_summary_layout(&chain_summary.params)),
             )?);
+            next_nodes.push(AggregationNodeRef::Aggregate {
+                layer_index,
+                node_index,
+            });
+            next_summaries.push(chain_summary);
+        }
+        if current_nodes.len() % 2 == 1 {
+            let carried_node = *current_nodes.last().ok_or(ProofError::StatementMismatch)?;
+            next_nodes.push(carried_node);
+            next_summaries.push(
+                current_summaries
+                    .last()
+                    .ok_or(ProofError::StatementMismatch)?
+                    .clone(),
+            );
+        }
+        layers.push(next_layer);
+        current_nodes = next_nodes;
+        current_summaries = next_summaries;
+    }
+
+    let chain_summary = current_summaries
+        .pop()
+        .ok_or(ProofError::StatementMismatch)?;
+
+    Ok(AggregatedRecursiveActualPbsChainChunkTreeProof {
+        leaves,
+        layers,
+        chain_summary,
+    })
+}
+
+pub fn prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree(
+    leaves: Vec<RecursiveActualPbsChainChunkProof>,
+) -> Result<AggregatedRecursiveActualPbsChainChunkTreeProof, ProofError> {
+    validate_aggregation_leaf_count(leaves.len())?;
+
+    let mut layers = Vec::new();
+    let mut current_nodes = (0..leaves.len())
+        .map(AggregationNodeRef::Leaf)
+        .collect::<Vec<_>>();
+    let mut current_summaries = leaves
+        .iter()
+        .map(|leaf| leaf.chain_summary.clone())
+        .collect::<Vec<_>>();
+    while current_nodes.len() > 1 {
+        let layer_index = layers.len();
+        let pair_count = current_nodes.len() / 2;
+        let mut next_layer = Vec::with_capacity(pair_count);
+        let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        let mut next_summaries = Vec::with_capacity(current_summaries.len().div_ceil(2));
+        for node_index in 0..pair_count {
+            let left =
+                aggregation_node_batch_proof(current_nodes[node_index * 2], &leaves, &layers);
+            let right =
+                aggregation_node_batch_proof(current_nodes[node_index * 2 + 1], &leaves, &layers);
+            let chain_summary = ActualPbsChainSummary::combine(
+                &current_summaries[node_index * 2],
+                &current_summaries[node_index * 2 + 1],
+            )?;
+            next_layer.push(
+                recursive::prove_private_aggregate_batch_proofs_with_chain_summary(
+                    left,
+                    right,
+                    &chain_summary.field_values(),
+                    Some(&chain_summary_layout(&chain_summary.params)),
+                )?,
+            );
             next_nodes.push(AggregationNodeRef::Aggregate {
                 layer_index,
                 node_index,

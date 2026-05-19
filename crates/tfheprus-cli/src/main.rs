@@ -27,8 +27,9 @@ use tfheprus_prover::{
     prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_mul_xai, prove_poly_mul,
-    prove_recursive_actual_pbs_chain_chunk, prove_sample_extract,
-    serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
+    prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
+    prove_private_recursive_actual_pbs_chain_chunk, prove_recursive_actual_pbs_chain_chunk,
+    prove_sample_extract, serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     serialize_aggregated_recursive_actual_pbs_chain_node_proof,
     serialize_aggregated_recursive_actual_pbs_chain_root_proof,
     serialize_recursive_actual_pbs_chain_chunk_proof, verify_actual_pbs_chain_chunk_proof,
@@ -76,6 +77,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Some("prove-pbs-chain-tree-aggregate-recursive") => {
             prove_pbs_chain_tree_aggregate_recursive_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+                parse_optional_chunk_count_arg(&args)?,
+            )?
+        }
+        Some("prove-pbs-chain-private-tree-aggregate-recursive") => {
+            prove_pbs_chain_private_tree_aggregate_recursive_demo(
                 parse_preset_arg(&args)?,
                 parse_chunk_step_count_arg(&args)?,
                 parse_optional_chunk_count_arg(&args)?,
@@ -814,6 +822,147 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
         aggregate_time.as_micros(),
         verify_time.as_millis(),
         verify_time.as_micros(),
+        root_verify_time.as_millis(),
+        root_verify_time.as_micros(),
+        root_proof_bytes.len(),
+        max_base_private_inputs,
+        max_recursive_public_inputs,
+        format_coefficients(&bsk_digest),
+        format_coefficients(&mask_digest)
+    );
+
+    Ok(())
+}
+
+fn prove_pbs_chain_private_tree_aggregate_recursive_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    requested_chunk_count: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    let chunk_count = requested_chunk_count.unwrap_or(4);
+    if chunk_count < 2 {
+        return Err("chunk count must be at least 2".into());
+    }
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?;
+    if total_steps == 0 || total_steps > params.lwe_dimension {
+        return Err(format!(
+            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let mut accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let mut bsk_digest = pbs_bsk_digest_initial();
+    let mut mask_digest = pbs_mask_digest_initial();
+    let mut leaves = Vec::with_capacity(chunk_count);
+    let mut total_leaf_prove_time = Duration::ZERO;
+    let mut max_base_private_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+
+    for chunk_index in 0..chunk_count {
+        let chunk_start = chunk_index * chunk_step_count;
+        let chunk_end = chunk_start + chunk_step_count;
+        let instance = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[chunk_start..chunk_end].to_vec(),
+            accumulator.clone(),
+            evaluation_key.bootstrapping_key[chunk_start..chunk_end].to_vec(),
+            bsk_digest,
+            mask_digest,
+        );
+        let base_private_inputs = instance.private_inputs().len();
+
+        let leaf_started = Instant::now();
+        let proof = prove_private_recursive_actual_pbs_chain_chunk(&instance)?;
+        let leaf_time = leaf_started.elapsed();
+        println!(
+            "pbs-chain-private-tree recursive leaf proved: preset={}, leaf={}, steps={}..{}, prove_us={}, base_private_inputs={}, recursive_public_inputs={}",
+            preset.name(),
+            chunk_index,
+            chunk_start,
+            chunk_end,
+            leaf_time.as_micros(),
+            base_private_inputs,
+            proof.recursion.public_input_count()
+        );
+
+        total_leaf_prove_time += leaf_time;
+        max_base_private_inputs = max_base_private_inputs.max(base_private_inputs);
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(proof.recursion.public_input_count());
+        accumulator = instance.output_accumulator;
+        bsk_digest = instance.bsk_digest_out;
+        mask_digest = instance.mask_digest_out;
+        leaves.push(proof);
+    }
+
+    let aggregate_started = Instant::now();
+    let proof = prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree(leaves)?;
+    let aggregate_time = aggregate_started.elapsed();
+
+    if total_steps == params.lwe_dimension {
+        let evaluation_key_ntt = evaluation_key.to_ntt();
+        let native_output =
+            bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+        let chunked_output = sample_extract_index_zero(&accumulator);
+        assert_eq!(chunked_output, native_output);
+        println!(
+            "full_private_tree_output_message={}",
+            chunked_output.decrypt(&params, &sk.extracted_output_lwe_key())
+        );
+    }
+
+    let layer_sizes = proof
+        .layers
+        .iter()
+        .map(|layer| layer.len().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let root_table_count = proof.root_table_count().unwrap_or(0);
+    let root_public_input_count = proof.root_public_input_count().unwrap_or(0);
+    let chain_summary_fields = proof.chain_summary.field_values().len();
+    let leaf_count = proof.leaf_count();
+    let layer_count = proof.layer_count();
+    let root_summary = proof.chain_summary.clone();
+    let root_proof = proof.into_root_proof()?;
+    let root_proof_bytes = serialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof)?;
+    let decoded_root_proof =
+        deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof_bytes)?;
+    let root_verify_started = Instant::now();
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root_summary,
+        &decoded_root_proof,
+    )?;
+    let root_verify_time = root_verify_started.elapsed();
+    println!(
+        "pbs-chain-private-tree aggregate recursive proof verified: preset={}, chunk_steps={}, chunk_count={}, total_steps={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}, chain_summary_fields={}",
+        preset.name(),
+        chunk_step_count,
+        chunk_count,
+        total_steps,
+        leaf_count,
+        layer_count,
+        layer_sizes,
+        root_table_count,
+        root_public_input_count,
+        chain_summary_fields
+    );
+    println!(
+        "leaf_prove_ms={}, leaf_prove_us={}, aggregate_prove_ms={}, aggregate_prove_us={}, root_verify_ms={}, root_verify_us={}, root_proof_bytes={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        total_leaf_prove_time.as_millis(),
+        total_leaf_prove_time.as_micros(),
+        aggregate_time.as_millis(),
+        aggregate_time.as_micros(),
         root_verify_time.as_millis(),
         root_verify_time.as_micros(),
         root_proof_bytes.len(),
@@ -1967,7 +2116,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
