@@ -261,11 +261,14 @@ reused both artifacts with `written=0`, `reused=2`, `total_prove_us=0`, and
 `aggregate-pbs-chain-leaves-recursive` produced a one-layer root with
 `root_public_inputs=871`, `chain_summary_fields=55`,
 `aggregate_us=11982676`, `verify_us=478890`, `root_verify_us=14925`, and
-`root_artifact_bytes=906094`. The directory aggregator
-`aggregate-pbs-chain-leaf-dir-recursive` can consume the same checkpoint
-directory either with an explicit leaf count or by scanning sorted `leaf-*.bin`
-files; the explicit-count smoke produced `aggregate_us=11923998`,
-`verify_us=476951`, `root_verify_us=14928`, and `root_artifact_bytes=906094`.
+`root_artifact_bytes=906094`. The directory aggregator now writes recursive
+aggregation checkpoints under `<leaf_dir>/aggregation`, so interrupted runs can
+resume from the last completed layer node instead of rebuilding the whole tree.
+It can consume the same checkpoint directory either with an explicit leaf count
+or by scanning sorted `leaf-*.bin` files; the explicit-count smoke produced
+`aggregate_us=12102511`, `root_verify_us=15051`, and
+`root_artifact_bytes=906094`, and an immediate rerun reused the layer checkpoint
+with `aggregate_us=0` and `root_verify_us=17725`.
 `verify-pbs-chain-root-artifact-recursive` verified the resulting root artifact
 from disk with `verify_us=15878`. The deserializer rehydrates lookup metadata
 that Plonky3 native verification can rebuild internally but recursive verifier
@@ -280,11 +283,32 @@ tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728` yields `chunk_count=91`,
 `full_chunk_private_inputs=229896`, and
 `total_leaf_private_inputs=20920536`.
 
-Remaining gap to paper-param PBS: execute the full 728-step paper-v1 run using
-the checkpoint artifact flow, replace the current PoC digest with the final
-paper-style hash/commitment chain, harden recursive MMCS verification for capped
-Merkle commitments, and add the final TFHE key-switch if the target statement
-needs ciphertexts under the original output LWE key.
+The full paper-v1 leaf checkpoint run completed for `chunk_steps=8` and
+`chunk_count=91`, covering all 728 blind-rotation steps. It reused one existing
+leaf, wrote 90 new leaves, and reported
+`total_artifact_bytes=231710346`, `total_prove_us=18068542366`,
+`total_verify_us=5668620773`, `max_base_private_inputs=229896`, and
+`max_recursive_public_inputs=8318`. Binary recursive aggregation then completed
+layers `[45,23,11,6]` and wrote 85 aggregate checkpoints, but the first
+layer-4 node was killed after reaching about 28.5 GiB RSS. The practical
+artifact for the current Plonky3-recursion path is therefore a frontier package:
+`package-pbs-chain-frontier-dir-recursive
+target/pbs-checkpoints-paper-v1-c8/frontier-layer3.bin
+target/pbs-checkpoints-paper-v1-c8/aggregation/layer-003` packages the six
+layer-3 proofs into an 82,002,970-byte artifact, and
+`verify-pbs-chain-frontier-artifact-recursive` verifies it with `params_n=728`,
+`total_steps=728`, `chain_summary_fields=4119`,
+`total_public_inputs=13897142`, `max_public_inputs=2491473`, and
+`verify_us=4083332`.
+
+Remaining gap to the paper's PBS IVC shape: replace the current proof-of-proof
+aggregation, whose public input grows with child verifier data, with a
+fixed-shape IVC circuit where proof commitments/openings are private witness
+data and only the PBS state plus BSK/mask hash-chain summary remain public.
+The PoC digest should also be replaced with the final paper-style
+hash/commitment chain, recursive MMCS verification should be hardened for capped
+Merkle commitments, and the final TFHE key-switch should be added if the target
+statement needs ciphertexts under the original output LWE key.
 
 ## Validation
 
