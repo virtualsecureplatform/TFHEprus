@@ -41,6 +41,12 @@ use tfheprus_circuits::{
 use tfheprus_core::{Goldilocks, Params};
 
 const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
+pub(crate) const BASE_PROOF_FRI_LOG_BLOWUP: usize = 1;
+pub(crate) const BASE_PROOF_FRI_LOG_FINAL_POLY_LEN: usize = 0;
+pub(crate) const BASE_PROOF_FRI_MAX_LOG_ARITY: usize = 3;
+pub(crate) const BASE_PROOF_FRI_COMMIT_POW_BITS: usize = 0;
+pub(crate) const BASE_PROOF_FRI_QUERY_POW_BITS: usize = 16;
+pub(crate) const BASE_PROOF_FRI_NUM_QUERIES: usize = 100;
 pub(crate) const PROOF_FRI_LOG_BLOWUP: usize = 4;
 pub(crate) const PROOF_FRI_LOG_FINAL_POLY_LEN: usize = 0;
 pub(crate) const PROOF_FRI_MAX_LOG_ARITY: usize = 3;
@@ -1788,8 +1794,8 @@ fn prove_circuit(
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
-    let config = goldilocks_config();
-    let table_packing = proof_table_packing();
+    let config = base_goldilocks_config();
+    let table_packing = base_proof_table_packing();
     let range_bit_counts = range_check_bit_counts(circuit);
     let range_preprocessors = range_preprocessors(&range_bit_counts);
     let range_air_builders = range_air_builders(&range_bit_counts);
@@ -1838,7 +1844,7 @@ fn verify_circuit_proof(
         return Err(ProofError::StatementMismatch);
     }
 
-    let config = goldilocks_config();
+    let config = base_goldilocks_config();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
     register_range_check_provers(&mut prover, &range_bit_counts);
@@ -1850,7 +1856,7 @@ fn verify_circuit_proof(
 fn rebuild_circuit_proof_common_lookups(
     proof: &mut BatchStarkProof<GoldilocksConfig>,
 ) -> Result<(), ProofError> {
-    let config = goldilocks_config();
+    let config = base_goldilocks_config();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
     register_range_check_provers(&mut prover, &range_bit_counts);
@@ -1876,7 +1882,7 @@ fn expected_circuit_common_data(
     circuit: &Circuit<P3Goldilocks>,
     table_packing: &TablePacking,
 ) -> Result<CommonData<GoldilocksConfig>, ProofError> {
-    let config = goldilocks_config();
+    let config = base_goldilocks_config();
     let range_bit_counts = range_check_bit_counts(circuit);
     let range_preprocessors = range_preprocessors(&range_bit_counts);
     let range_air_builders = range_air_builders(&range_bit_counts);
@@ -1971,7 +1977,36 @@ type P3Mmcs = MerkleTreeMmcs<
     4,
 >;
 
+pub(crate) fn base_goldilocks_config() -> GoldilocksConfig {
+    goldilocks_config_with_fri(
+        BASE_PROOF_FRI_LOG_BLOWUP,
+        BASE_PROOF_FRI_LOG_FINAL_POLY_LEN,
+        BASE_PROOF_FRI_MAX_LOG_ARITY,
+        BASE_PROOF_FRI_NUM_QUERIES,
+        BASE_PROOF_FRI_COMMIT_POW_BITS,
+        BASE_PROOF_FRI_QUERY_POW_BITS,
+    )
+}
+
 pub(crate) fn goldilocks_config() -> GoldilocksConfig {
+    goldilocks_config_with_fri(
+        PROOF_FRI_LOG_BLOWUP,
+        PROOF_FRI_LOG_FINAL_POLY_LEN,
+        PROOF_FRI_MAX_LOG_ARITY,
+        PROOF_FRI_NUM_QUERIES,
+        PROOF_FRI_COMMIT_POW_BITS,
+        PROOF_FRI_QUERY_POW_BITS,
+    )
+}
+
+fn goldilocks_config_with_fri(
+    log_blowup: usize,
+    log_final_poly_len: usize,
+    max_log_arity: usize,
+    num_queries: usize,
+    commit_proof_of_work_bits: usize,
+    query_proof_of_work_bits: usize,
+) -> GoldilocksConfig {
     let perm = goldilocks_poseidon2_8();
     let hash = P3Hash::new(perm.clone());
     let compress = P3Compress::new(perm.clone());
@@ -1979,18 +2014,23 @@ pub(crate) fn goldilocks_config() -> GoldilocksConfig {
     let challenge_mmcs = ExtensionMmcs::<P3Goldilocks, P3Challenge, P3Mmcs>::new(val_mmcs.clone());
     let dft = Radix2DitParallel::default();
     let fri_params = FriParameters {
-        log_blowup: PROOF_FRI_LOG_BLOWUP,
-        log_final_poly_len: PROOF_FRI_LOG_FINAL_POLY_LEN,
-        max_log_arity: PROOF_FRI_MAX_LOG_ARITY,
-        num_queries: PROOF_FRI_NUM_QUERIES,
-        commit_proof_of_work_bits: PROOF_FRI_COMMIT_POW_BITS,
-        query_proof_of_work_bits: PROOF_FRI_QUERY_POW_BITS,
+        log_blowup,
+        log_final_poly_len,
+        max_log_arity,
+        num_queries,
+        commit_proof_of_work_bits,
+        query_proof_of_work_bits,
         mmcs: challenge_mmcs,
     };
     let pcs = TwoAdicFriPcs::new(dft, val_mmcs, fri_params);
     let challenger = DuplexChallenger::new(perm);
 
     StarkConfig::new(pcs, challenger)
+}
+
+pub(crate) fn base_proof_table_packing() -> TablePacking {
+    TablePacking::default()
+        .with_fri_params(BASE_PROOF_FRI_LOG_FINAL_POLY_LEN, BASE_PROOF_FRI_LOG_BLOWUP)
 }
 
 pub(crate) fn proof_table_packing() -> TablePacking {
