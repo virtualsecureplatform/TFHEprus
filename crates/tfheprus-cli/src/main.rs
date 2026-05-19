@@ -1154,8 +1154,8 @@ enum RecursivePbsChainNodeArtifact {
 }
 
 enum LoadedRecursivePbsChainNode {
-    Leaf(RecursiveActualPbsChainChunkProof),
-    Aggregate(AggregatedRecursiveActualPbsChainNodeProof),
+    Leaf(Box<RecursiveActualPbsChainChunkProof>),
+    Aggregate(Box<AggregatedRecursiveActualPbsChainNodeProof>),
 }
 
 impl RecursivePbsChainNodeArtifact {
@@ -1393,11 +1393,11 @@ fn load_recursive_pbs_chain_node(
     match node {
         RecursivePbsChainNodeArtifact::Leaf(_) => {
             let proof = deserialize_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
-            Ok(LoadedRecursivePbsChainNode::Leaf(proof))
+            Ok(LoadedRecursivePbsChainNode::Leaf(Box::new(proof)))
         }
         RecursivePbsChainNodeArtifact::Aggregate(_) => {
             let proof = deserialize_aggregated_recursive_actual_pbs_chain_node_proof(&bytes)?;
-            Ok(LoadedRecursivePbsChainNode::Aggregate(proof))
+            Ok(LoadedRecursivePbsChainNode::Aggregate(Box::new(proof)))
         }
     }
 }
