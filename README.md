@@ -303,20 +303,25 @@ layer-3 proofs into an 82,002,970-byte artifact, and
 `total_public_inputs=13897142`, `max_public_inputs=2491473`, and
 `verify_us=4083332`.
 
-Current gap to the paper's PBS IVC shape: the compact-private recursive path now
-proves leaves and aggregates with summary-only public inputs, and the PBS
-BSK/mask chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. The
-post-switch paper-v1 compact smoke `bench-pbs-chain-private-compact paper-v1 1 2`
-proves two one-step paper-shaped leaves, aggregates them, serializes the root,
-and verifies it with `params_n=728`, `max_base_public_inputs=4112`,
-`max_recursive_public_inputs=31`, `root_public_inputs=31`, and
-`root_verify_us=3455`. The full paper-v1 compact root still needs a fresh
-end-to-end run after these Poseidon2/capped-MMCS changes, and the final TFHE
-key-switch should be added if
-the target statement needs ciphertexts under the original output LWE key. The
-recursive STARK configs use capped Merkle commitments (`MERKLE_CAP_HEIGHT=2`),
-including a zero-depth capped MMCS verifier regression test for the case where
-the cap covers the whole opening path.
+Current paper-style PBS IVC PoC: the compact-private recursive path proves
+leaves and aggregates with summary-only public inputs, and the PBS BSK/mask
+chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. A fresh
+post-switch run of `bench-pbs-chain-private-compact paper-v1 8 91` with
+`RAYON_NUM_THREADS=16` proved all 728 paper-v1 blind-rotation steps, matched
+the native NTT PBS output with
+`full_compact_leaf_checkpoint_output_message=3`, aggregated 91 leaves through
+90 compact recursive aggregate nodes, serialized
+`target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin`,
+and verified the root artifact with `params_n=728`, `total_steps=728`,
+`root_public_inputs=31`, `compact_summary_fields=31`, and `verify_us=3608`.
+The run reported `total_prove_us=2632942941`, `aggregate_us=158063586`,
+`total_us=2800000889`, `leaf_artifact_bytes=165375173`,
+`aggregate_artifact_bytes=16124081`, and `root_artifact_bytes=179144`.
+The recursive STARK configs use capped Merkle commitments
+(`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
+test for the case where the cap covers the whole opening path. The remaining
+implementation gap is the final TFHE key-switch if the target statement needs
+ciphertexts under the original output LWE key.
 
 ## Validation
 
