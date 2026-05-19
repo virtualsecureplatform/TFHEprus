@@ -306,8 +306,13 @@ layer-3 proofs into an 82,002,970-byte artifact, and
 Current gap to the paper's PBS IVC shape: the compact-private recursive path now
 proves leaves and aggregates with summary-only public inputs, and the PBS
 BSK/mask chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. The
-full paper-v1 compact root still needs a fresh end-to-end run after this
-Poseidon2/capped-MMCS switch, and the final TFHE key-switch should be added if
+post-switch paper-v1 compact smoke `bench-pbs-chain-private-compact paper-v1 1 2`
+proves two one-step paper-shaped leaves, aggregates them, serializes the root,
+and verifies it with `params_n=728`, `max_base_public_inputs=4112`,
+`max_recursive_public_inputs=31`, `root_public_inputs=31`, and
+`root_verify_us=3455`. The full paper-v1 compact root still needs a fresh
+end-to-end run after these Poseidon2/capped-MMCS changes, and the final TFHE
+key-switch should be added if
 the target statement needs ciphertexts under the original output LWE key. The
 recursive STARK configs use capped Merkle commitments (`MERKLE_CAP_HEIGHT=2`),
 including a zero-depth capped MMCS verifier regression test for the case where
