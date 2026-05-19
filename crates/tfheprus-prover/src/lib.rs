@@ -287,6 +287,16 @@ impl CompactActualPbsChainSummary {
         values.extend(self.public_inputs.iter().copied());
         values
     }
+
+    pub fn output_accumulator_digest(
+        &self,
+    ) -> Result<[P3Goldilocks; SELECTOR_DIGEST_WIDTH], ProofError> {
+        let view = compact_summary_public_view(self)?;
+        Ok(view
+            .output_accumulator
+            .try_into()
+            .expect("compact accumulator digest has fixed width"))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1804,6 +1814,12 @@ fn compact_public_view<'a>(
 
 fn compact_accumulator_digest(values: &[P3Goldilocks]) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
     poseidon_chain::poseidon2_digest_fields(COMPACT_ACCUMULATOR_DIGEST_TAG, values.iter().copied())
+}
+
+pub fn compact_accumulator_digest_public_values(
+    values: &[P3Goldilocks],
+) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    compact_accumulator_digest(values)
 }
 
 #[derive(Clone, Copy)]
