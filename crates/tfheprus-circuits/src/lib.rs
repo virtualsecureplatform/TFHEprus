@@ -4,9 +4,12 @@ pub mod range_check;
 pub mod sha3_circuit;
 
 use p3_circuit::circuit::Circuit;
+use p3_circuit::ops::{generate_poseidon2_trace, GoldilocksD1Width8, Poseidon2Config};
 use p3_circuit::{CircuitBuilder, ExprId};
-use p3_field::PrimeCharacteristicRing;
-use p3_goldilocks::Goldilocks as P3Goldilocks;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
+use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
+use rand_p3::SeedableRng;
 use range_check::{range_check_expr, register_range_check_npo};
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
@@ -19,14 +22,19 @@ use tfheprus_core::{
 
 pub const SELECTOR_DIGEST_WIDTH: usize = 4;
 pub const SHA3_DIGEST_WIDTH: usize = SHA3_256_DIGEST_FIELD_ELEMENTS;
+pub const POSEIDON2_DIGEST_RATE: usize = 4;
 
 pub const SHA3_PBS_BSK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-bsk-chain";
 pub const SHA3_PBS_MASK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-mask-chain";
+pub const POSEIDON2_PBS_BSK_CHAIN_TAG: u64 = 0x7062_735f_6273_6b31;
+pub const POSEIDON2_PBS_MASK_CHAIN_TAG: u64 = 0x7062_735f_6d61_736b;
 
 pub const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
 pub const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;
 pub const SELECTOR_DIGEST_MDS: [[u64; SELECTOR_DIGEST_WIDTH]; SELECTOR_DIGEST_WIDTH] =
     [[2, 3, 5, 7], [7, 2, 3, 5], [5, 7, 2, 3], [3, 5, 7, 2]];
+
+type PbsPoseidon2Hash = PaddingFreeSponge<Poseidon2Goldilocks<8>, 8, 4, SELECTOR_DIGEST_WIDTH>;
 
 #[derive(Clone)]
 struct GlweExpr {
@@ -821,6 +829,7 @@ pub fn build_actual_pbs_step_chain_circuit(
     assert!(instance.params.glwe_dimension > 0);
 
     let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    enable_pbs_chain_digest_npo(&mut builder);
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
@@ -836,9 +845,10 @@ pub fn build_actual_pbs_step_chain_circuit(
     let mask_value = builder.alloc_private_input("actual_pbs_step_private_mask_value");
 
     let computed_bsk_digest_out =
-        digest_update_expr(&mut builder, bsk_digest_in, ggsw_ntt_expr_values(&selector));
+        pbs_bsk_digest_update_expr(&mut builder, bsk_digest_in, ggsw_ntt_expr_values(&selector));
     connect_digest(&mut builder, &computed_bsk_digest_out, &bsk_digest_out);
-    let computed_mask_digest_out = digest_update_expr(&mut builder, mask_digest_in, [mask_value]);
+    let computed_mask_digest_out =
+        pbs_mask_digest_update_expr(&mut builder, mask_digest_in, [mask_value]);
     connect_digest(&mut builder, &computed_mask_digest_out, &mask_digest_out);
 
     let exponent_bits =
@@ -872,6 +882,7 @@ pub fn build_actual_pbs_chain_chunk_shape_circuit(
     assert!(step_count > 0);
 
     let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    enable_pbs_chain_digest_npo(&mut builder);
     register_range_check_npo(&mut builder, params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(params) {
         register_range_check_npo(&mut builder, error_bits);
@@ -887,8 +898,9 @@ pub fn build_actual_pbs_chain_chunk_shape_circuit(
     for _ in 0..step_count {
         let selector = alloc_private_ggsw_ntt(&mut builder, params);
         let mask_value = builder.alloc_private_input("actual_pbs_chunk_private_mask_value");
-        bsk_digest = digest_update_expr(&mut builder, bsk_digest, ggsw_ntt_expr_values(&selector));
-        mask_digest = digest_update_expr(&mut builder, mask_digest, [mask_value]);
+        bsk_digest =
+            pbs_bsk_digest_update_expr(&mut builder, bsk_digest, ggsw_ntt_expr_values(&selector));
+        mask_digest = pbs_mask_digest_update_expr(&mut builder, mask_digest, [mask_value]);
 
         let exponent_bits =
             mod_switch_exponent_bits_expr(&mut builder, mask_value, params.exponent_modulus());
@@ -907,30 +919,52 @@ pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
 
+fn p3_to_core(value: P3Goldilocks) -> Goldilocks {
+    Goldilocks::from_u64(value.as_canonical_u64())
+}
+
+fn goldilocks_poseidon2_8() -> Poseidon2Goldilocks<8> {
+    let mut rng = rand_p3::rngs::SmallRng::seed_from_u64(1);
+    Poseidon2Goldilocks::<8>::new_from_rng_128(&mut rng)
+}
+
+fn enable_pbs_chain_digest_npo(builder: &mut CircuitBuilder<P3Goldilocks>) {
+    builder.enable_poseidon2_perm_width_8::<GoldilocksD1Width8, _>(
+        generate_poseidon2_trace::<P3Goldilocks, GoldilocksD1Width8>,
+        goldilocks_poseidon2_8(),
+    );
+}
+
 pub fn selector_ntt_digest(ct: &GgswCiphertext) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
     selector_digest_from_values(ggsw_ntt_values(ct))
 }
 
 pub fn pbs_bsk_digest_initial() -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    digest_initial_state(0x6273_6b5f_6368_6169)
+    pbs_poseidon2_digest(POSEIDON2_PBS_BSK_CHAIN_TAG, core::iter::empty())
 }
 
 pub fn pbs_mask_digest_initial() -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    digest_initial_state(0x6d61_736b_6368_6169)
+    pbs_poseidon2_digest(POSEIDON2_PBS_MASK_CHAIN_TAG, core::iter::empty())
 }
 
 pub fn pbs_bsk_digest_update(
     previous: [Goldilocks; SELECTOR_DIGEST_WIDTH],
     selector: &GgswCiphertext,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    digest_update_from_values(previous, ggsw_ntt_values(selector))
+    pbs_poseidon2_digest(
+        POSEIDON2_PBS_BSK_CHAIN_TAG,
+        previous.into_iter().chain(ggsw_ntt_values(selector)),
+    )
 }
 
 pub fn pbs_mask_digest_update(
     previous: [Goldilocks; SELECTOR_DIGEST_WIDTH],
     mask_value: Goldilocks,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    digest_update_from_values(previous, [mask_value])
+    pbs_poseidon2_digest(
+        POSEIDON2_PBS_MASK_CHAIN_TAG,
+        previous.into_iter().chain([mask_value]),
+    )
 }
 
 pub fn pbs_sha3_bsk_digest_initial() -> [Goldilocks; SHA3_DIGEST_WIDTH] {
@@ -957,6 +991,30 @@ pub fn pbs_sha3_mask_digest_update(
     mask_value: Goldilocks,
 ) -> [Goldilocks; SHA3_DIGEST_WIDTH] {
     sha3_256_chain_update_fields(SHA3_PBS_MASK_CHAIN_DOMAIN, &previous, [mask_value])
+}
+
+fn pbs_poseidon2_digest(
+    tag: u64,
+    values: impl IntoIterator<Item = Goldilocks>,
+) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    let input = pbs_poseidon2_digest_input(tag, values);
+    let hasher = PbsPoseidon2Hash::new(goldilocks_poseidon2_8());
+    hasher.hash_iter(input).map(p3_to_core)
+}
+
+fn pbs_poseidon2_digest_input(
+    tag: u64,
+    values: impl IntoIterator<Item = Goldilocks>,
+) -> Vec<P3Goldilocks> {
+    let values = values.into_iter().collect::<Vec<_>>();
+    let mut input = Vec::with_capacity(2 + values.len() + POSEIDON2_DIGEST_RATE);
+    input.push(P3Goldilocks::from_u64(tag));
+    input.push(P3Goldilocks::from_u64(values.len() as u64));
+    input.extend(values.into_iter().map(core_to_p3));
+    while input.len() % POSEIDON2_DIGEST_RATE != 0 {
+        input.push(P3Goldilocks::ZERO);
+    }
+    input
 }
 
 fn append_polynomial_public_inputs(inputs: &mut Vec<P3Goldilocks>, poly: &Polynomial) {
@@ -1042,10 +1100,10 @@ fn ggsw_ntt_values(ct: &GgswCiphertext) -> Vec<Goldilocks> {
 fn selector_digest_from_values(
     values: impl IntoIterator<Item = Goldilocks>,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    digest_update_from_values(core::array::from_fn(selector_digest_initial_state), values)
+    selector_digest_update_from_values(core::array::from_fn(selector_digest_initial_state), values)
 }
 
-pub fn digest_update_from_values(
+fn selector_digest_update_from_values(
     mut state: [Goldilocks; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = Goldilocks>,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
@@ -1090,10 +1148,6 @@ fn selector_digest_mds_native(
             .map(|(&value, &coeff)| value * Goldilocks::from_u64(coeff))
             .sum()
     })
-}
-
-pub fn digest_initial_state(tag: u64) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    core::array::from_fn(|lane| selector_digest_const(tag, lane, 0, 0))
 }
 
 fn selector_digest_initial_state(lane: usize) -> Goldilocks {
@@ -1313,10 +1367,53 @@ fn selector_digest_expr(
     let state = core::array::from_fn(|lane| {
         builder.define_const(core_to_p3(selector_digest_initial_state(lane)))
     });
-    digest_update_expr(builder, state, ggsw_ntt_expr_values(selector))
+    selector_digest_update_expr(builder, state, ggsw_ntt_expr_values(selector))
 }
 
-fn digest_update_expr(
+fn pbs_bsk_digest_update_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    previous: [ExprId; SELECTOR_DIGEST_WIDTH],
+    values: impl IntoIterator<Item = ExprId>,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    pbs_poseidon2_digest_update_expr(builder, POSEIDON2_PBS_BSK_CHAIN_TAG, previous, values)
+}
+
+fn pbs_mask_digest_update_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    previous: [ExprId; SELECTOR_DIGEST_WIDTH],
+    values: impl IntoIterator<Item = ExprId>,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    pbs_poseidon2_digest_update_expr(builder, POSEIDON2_PBS_MASK_CHAIN_TAG, previous, values)
+}
+
+fn pbs_poseidon2_digest_update_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    tag: u64,
+    previous: [ExprId; SELECTOR_DIGEST_WIDTH],
+    values: impl IntoIterator<Item = ExprId>,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    let values = values.into_iter().collect::<Vec<_>>();
+    let mut input =
+        Vec::with_capacity(2 + SELECTOR_DIGEST_WIDTH + values.len() + POSEIDON2_DIGEST_RATE);
+    input.push(builder.define_const(P3Goldilocks::from_u64(tag)));
+    input.push(builder.define_const(P3Goldilocks::from_u64(
+        (SELECTOR_DIGEST_WIDTH + values.len()) as u64,
+    )));
+    input.extend(previous);
+    input.extend(values);
+    while input.len() % POSEIDON2_DIGEST_RATE != 0 {
+        input.push(builder.define_const(P3Goldilocks::ZERO));
+    }
+
+    let outputs = builder
+        .add_hash_slice(&Poseidon2Config::GOLDILOCKS_D1_W8, &input, true)
+        .expect("Goldilocks D1 Poseidon2 digest NPO must be enabled");
+    outputs
+        .try_into()
+        .expect("Goldilocks D1 Poseidon2 digest exposes four base-field limbs")
+}
+
+fn selector_digest_update_expr(
     builder: &mut CircuitBuilder<P3Goldilocks>,
     mut state: [ExprId; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = ExprId>,

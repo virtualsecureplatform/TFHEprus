@@ -10,7 +10,8 @@ use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
     poseidon2_air_builders, poseidon2_preprocessor, recompose_air_builders, recompose_preprocessor,
     recompose_table_provers, BatchStarkProof, BatchStarkProver, CircuitProverData,
-    ConstraintProfile, Poseidon2ProverD2, PrimitiveTable, TablePacking, TableProver,
+    ConstraintProfile, Poseidon2ProverD1, Poseidon2ProverD2, PrimitiveTable, TablePacking,
+    TableProver,
 };
 use p3_commit::ExtensionMmcs;
 use p3_field::extension::BinomialExtensionField;
@@ -1532,13 +1533,20 @@ fn recursive_batch_table_provers() -> Vec<Box<dyn TableProver<GoldilocksConfig>>
 fn base_table_provers(
     proof: &BatchStarkProof<GoldilocksConfig>,
 ) -> Vec<Box<dyn TableProver<GoldilocksConfig>>> {
-    proof_range_check_bit_counts(proof)
-        .into_iter()
-        .map(|bit_count| {
-            Box::new(RangeCheckProver::new(bit_count, RANGE_CHECK_DEFAULT_LANES))
-                as Box<dyn TableProver<GoldilocksConfig>>
-        })
-        .collect()
+    let mut provers: Vec<Box<dyn TableProver<GoldilocksConfig>>> =
+        vec![Box::new(Poseidon2ProverD1::new(
+            Poseidon2Config::GOLDILOCKS_D1_W8,
+            ConstraintProfile::Standard,
+        ))];
+    provers.extend(
+        proof_range_check_bit_counts(proof)
+            .into_iter()
+            .map(|bit_count| {
+                Box::new(RangeCheckProver::new(bit_count, RANGE_CHECK_DEFAULT_LANES))
+                    as Box<dyn TableProver<GoldilocksConfig>>
+            }),
+    );
+    provers
 }
 
 fn flatten_extension_values(values: &[Challenge]) -> Vec<F> {

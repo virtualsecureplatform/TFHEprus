@@ -1073,6 +1073,8 @@ dependencies = [
  "p3-circuit",
  "p3-field",
  "p3-goldilocks",
+ "p3-symmetric",
+ "rand 0.10.1",
  "tfheprus-core",
 ]
 

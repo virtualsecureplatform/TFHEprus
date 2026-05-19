@@ -10,3 +10,5 @@ tfheprus-core = { path = "../tfheprus-core" }
 p3-circuit.workspace = true
 p3-field.workspace = true
 p3-goldilocks.workspace = true
+p3-symmetric.workspace = true
+rand_p3 = { package = "rand", version = "0.10.0", default-features = false }

@@ -11,11 +11,12 @@ use p3_batch_stark::common::CommonData;
 use p3_batch_stark::ProverData;
 use p3_challenger::DuplexChallenger;
 use p3_circuit::circuit::Circuit;
+use p3_circuit::ops::Poseidon2Config;
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
-    BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, PrimitiveTable,
-    TablePacking, NUM_PRIMITIVE_TABLES,
+    poseidon2_air_builders_d1, poseidon2_preprocessor, BatchStarkProof, BatchStarkProver,
+    CircuitProverData, ConstraintProfile, PrimitiveTable, TablePacking, NUM_PRIMITIVE_TABLES,
 };
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
@@ -1797,14 +1798,14 @@ fn prove_circuit(
     let config = base_goldilocks_config();
     let table_packing = base_proof_table_packing();
     let range_bit_counts = range_check_bit_counts(circuit);
-    let range_preprocessors = range_preprocessors(&range_bit_counts);
-    let range_air_builders = range_air_builders(&range_bit_counts);
+    let preprocessors = base_preprocessors(&range_bit_counts);
+    let air_builders = base_air_builders(&range_bit_counts);
     let (airs_degrees, primitive_columns, non_primitive_columns) =
         get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
             circuit,
             &table_packing,
-            &range_preprocessors,
-            &range_air_builders,
+            &preprocessors,
+            &air_builders,
             ConstraintProfile::Standard,
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
@@ -1825,7 +1826,7 @@ fn prove_circuit(
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     let mut prover = BatchStarkProver::new(config).with_table_packing(table_packing);
-    register_range_check_provers(&mut prover, &range_bit_counts);
+    register_base_table_provers(&mut prover, &range_bit_counts);
     prover
         .prove_all_tables(&traces, &circuit_prover_data)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
@@ -1847,7 +1848,7 @@ fn verify_circuit_proof(
     let config = base_goldilocks_config();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
-    register_range_check_provers(&mut prover, &range_bit_counts);
+    register_base_table_provers(&mut prover, &range_bit_counts);
     prover
         .verify_all_tables(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
@@ -1859,7 +1860,7 @@ fn rebuild_circuit_proof_common_lookups(
     let config = base_goldilocks_config();
     let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
     let range_bit_counts = proof_range_check_bit_counts(proof);
-    register_range_check_provers(&mut prover, &range_bit_counts);
+    register_base_table_provers(&mut prover, &range_bit_counts);
     prover
         .rebuild_common_lookups(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
@@ -1884,14 +1885,14 @@ fn expected_circuit_common_data(
 ) -> Result<CommonData<GoldilocksConfig>, ProofError> {
     let config = base_goldilocks_config();
     let range_bit_counts = range_check_bit_counts(circuit);
-    let range_preprocessors = range_preprocessors(&range_bit_counts);
-    let range_air_builders = range_air_builders(&range_bit_counts);
+    let preprocessors = base_preprocessors(&range_bit_counts);
+    let air_builders = base_air_builders(&range_bit_counts);
     let (airs_degrees, _primitive_columns, _non_primitive_columns) =
         get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
             circuit,
             table_packing,
-            &range_preprocessors,
-            &range_air_builders,
+            &preprocessors,
+            &air_builders,
             ConstraintProfile::Standard,
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
@@ -1929,6 +1930,22 @@ fn common_data_matches(
     }
 }
 
+fn base_preprocessors(
+    bit_counts: &[usize],
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoPreprocessor<P3Goldilocks>>> {
+    let mut preprocessors = vec![poseidon2_preprocessor::<P3Goldilocks>()];
+    preprocessors.extend(range_preprocessors(bit_counts));
+    preprocessors
+}
+
+fn base_air_builders(
+    bit_counts: &[usize],
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>> {
+    let mut air_builders = poseidon2_air_builders_d1::<GoldilocksConfig>();
+    air_builders.extend(range_air_builders(bit_counts));
+    air_builders
+}
+
 fn range_preprocessors(
     bit_counts: &[usize],
 ) -> Vec<Box<dyn p3_circuit_prover::common::NpoPreprocessor<P3Goldilocks>>> {
@@ -1951,6 +1968,14 @@ fn range_air_builders(
             )) as Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>
         })
         .collect()
+}
+
+fn register_base_table_provers(
+    prover: &mut BatchStarkProver<GoldilocksConfig>,
+    bit_counts: &[usize],
+) {
+    prover.register_poseidon2_table::<1>(Poseidon2Config::GOLDILOCKS_D1_W8);
+    register_range_check_provers(prover, bit_counts);
 }
 
 fn register_range_check_provers(
