@@ -17,7 +17,7 @@ use p3_circuit_prover::{
 };
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -33,11 +33,14 @@ use tfheprus_circuits::{
     build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
     build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
     build_actual_pbs_step_private_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
-    build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
-    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
+    build_sample_extract_circuit, digest_initial_state, digest_update_from_values,
+    ActualPbsChainChunkInstance, ActualPbsInstance, ActualPbsStepChainInstance,
+    ActualPbsStepInstance, ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance,
+    SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
 };
-use tfheprus_core::Params;
+use tfheprus_core::{Goldilocks, Params};
+
+const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
 
 pub struct PolyMulProof {
     pub degree: usize,
@@ -178,11 +181,99 @@ impl ActualPbsChainSummary {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactActualPbsChainSummary {
+    pub params: Params,
+    pub step_count: usize,
+    pub public_inputs: Vec<P3Goldilocks>,
+}
+
+impl CompactActualPbsChainSummary {
+    pub fn from_chunk_statement(
+        statement: &ActualPbsChainChunkStatement,
+    ) -> Result<Self, ProofError> {
+        let view = chunk_statement_public_view(statement)?;
+        let mut public_inputs = Vec::with_capacity(compact_chain_summary_public_field_count());
+        public_inputs.extend(compact_accumulator_digest(view.input_accumulator));
+        public_inputs.extend_from_slice(view.bsk_digest_in);
+        public_inputs.extend_from_slice(view.bsk_digest_out);
+        public_inputs.extend_from_slice(view.mask_digest_in);
+        public_inputs.extend_from_slice(view.mask_digest_out);
+        public_inputs.extend(compact_accumulator_digest(view.output_accumulator));
+
+        Ok(Self {
+            params: statement.params.clone(),
+            step_count: statement.step_count,
+            public_inputs,
+        })
+    }
+
+    pub fn from_full_summary(summary: &ActualPbsChainSummary) -> Result<Self, ProofError> {
+        let statement = ActualPbsChainChunkStatement {
+            params: summary.params.clone(),
+            step_count: summary.step_count,
+            public_inputs: summary.public_inputs.clone(),
+        };
+        Self::from_chunk_statement(&statement)
+    }
+
+    pub fn combine(left: &Self, right: &Self) -> Result<Self, ProofError> {
+        if left.params != right.params || left.step_count == 0 || right.step_count == 0 {
+            return Err(ProofError::StatementMismatch);
+        }
+        let step_count = left
+            .step_count
+            .checked_add(right.step_count)
+            .ok_or(ProofError::StatementMismatch)?;
+        if step_count > left.params.lwe_dimension {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let left_view = compact_summary_public_view(left)?;
+        let right_view = compact_summary_public_view(right)?;
+        if left_view.output_accumulator != right_view.input_accumulator
+            || left_view.bsk_digest_out != right_view.bsk_digest_in
+            || left_view.mask_digest_out != right_view.mask_digest_in
+        {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let mut public_inputs = Vec::with_capacity(compact_chain_summary_public_field_count());
+        public_inputs.extend_from_slice(left_view.input_accumulator);
+        public_inputs.extend_from_slice(left_view.bsk_digest_in);
+        public_inputs.extend_from_slice(right_view.bsk_digest_out);
+        public_inputs.extend_from_slice(left_view.mask_digest_in);
+        public_inputs.extend_from_slice(right_view.mask_digest_out);
+        public_inputs.extend_from_slice(right_view.output_accumulator);
+
+        Ok(Self {
+            params: left.params.clone(),
+            step_count,
+            public_inputs,
+        })
+    }
+
+    pub fn field_values(&self) -> Vec<P3Goldilocks> {
+        let mut values = Vec::with_capacity(compact_chain_summary_field_count());
+        values.extend(param_public_values(&self.params));
+        values.push(P3Goldilocks::from_u64(self.step_count as u64));
+        values.extend(self.public_inputs.iter().copied());
+        values
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct RecursiveActualPbsChainChunkProof {
     pub base: ActualPbsChainChunkProof,
     pub recursion: recursive::RecursiveBatchProof,
     pub chain_summary: ActualPbsChainSummary,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CompactRecursiveActualPbsChainChunkProof {
+    pub base: ActualPbsChainChunkProof,
+    pub recursion: recursive::RecursiveBatchProof,
+    pub chain_summary: CompactActualPbsChainSummary,
 }
 
 pub struct AggregatedRecursiveActualPbsChainChunkPairProof {
@@ -205,6 +296,12 @@ pub struct AggregatedRecursiveActualPbsChainNodeProof {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct CompactAggregatedRecursiveActualPbsChainNodeProof {
+    pub chain_summary: CompactActualPbsChainSummary,
+    pub aggregation: recursive::AggregatedRecursiveBatchProof,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct AggregatedRecursiveActualPbsChainFrontierProof {
     pub chain_summary: ActualPbsChainSummary,
     pub nodes: Vec<AggregatedRecursiveActualPbsChainNodeProof>,
@@ -216,9 +313,20 @@ pub struct AggregatedRecursiveActualPbsChainRootProof {
     pub root: recursive::AggregatedRecursiveBatchProof,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct CompactAggregatedRecursiveActualPbsChainRootProof {
+    pub chain_summary: CompactActualPbsChainSummary,
+    pub root: recursive::AggregatedRecursiveBatchProof,
+}
+
 pub enum RecursiveActualPbsChainNode<'a> {
     Leaf(&'a RecursiveActualPbsChainChunkProof),
     Aggregate(&'a AggregatedRecursiveActualPbsChainNodeProof),
+}
+
+pub enum CompactRecursiveActualPbsChainNode<'a> {
+    Leaf(&'a CompactRecursiveActualPbsChainChunkProof),
+    Aggregate(&'a CompactAggregatedRecursiveActualPbsChainNodeProof),
 }
 
 impl AggregatedRecursiveActualPbsChainChunkTreeProof {
@@ -277,6 +385,23 @@ impl AggregatedRecursiveActualPbsChainNodeProof {
     }
 }
 
+impl CompactAggregatedRecursiveActualPbsChainNodeProof {
+    pub fn public_input_count(&self) -> usize {
+        self.aggregation.public_input_count()
+    }
+
+    pub fn table_count(&self) -> usize {
+        self.aggregation.table_count()
+    }
+
+    pub fn into_root_proof(self) -> CompactAggregatedRecursiveActualPbsChainRootProof {
+        CompactAggregatedRecursiveActualPbsChainRootProof {
+            chain_summary: self.chain_summary,
+            root: self.aggregation,
+        }
+    }
+}
+
 impl AggregatedRecursiveActualPbsChainFrontierProof {
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -300,6 +425,22 @@ impl AggregatedRecursiveActualPbsChainFrontierProof {
 
 impl<'a> RecursiveActualPbsChainNode<'a> {
     fn chain_summary(&self) -> &ActualPbsChainSummary {
+        match self {
+            Self::Leaf(proof) => &proof.chain_summary,
+            Self::Aggregate(proof) => &proof.chain_summary,
+        }
+    }
+
+    fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
+        match self {
+            Self::Leaf(proof) => proof.recursion.batch_proof(),
+            Self::Aggregate(proof) => proof.aggregation.batch_proof(),
+        }
+    }
+}
+
+impl<'a> CompactRecursiveActualPbsChainNode<'a> {
+    fn chain_summary(&self) -> &CompactActualPbsChainSummary {
         match self {
             Self::Leaf(proof) => &proof.chain_summary,
             Self::Aggregate(proof) => &proof.chain_summary,
@@ -693,6 +834,27 @@ pub fn prove_private_recursive_actual_pbs_chain_chunk(
     })
 }
 
+pub fn prove_private_compact_recursive_actual_pbs_chain_chunk(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<CompactRecursiveActualPbsChainChunkProof, ProofError> {
+    let base = prove_actual_pbs_chain_chunk(instance)?;
+    let statement = base.public_statement();
+    let chain_summary = CompactActualPbsChainSummary::from_chunk_statement(&statement)?;
+    let recursion = recursive::prove_private_recursive_batch_with_compact_leaf_summary(
+        &base.proof,
+        &chain_summary.field_values(),
+        chain_summary_header_len(),
+        &chain_summary_layout(&chain_summary.params),
+        &compact_chain_summary_layout(),
+    )?;
+
+    Ok(CompactRecursiveActualPbsChainChunkProof {
+        base,
+        recursion,
+        chain_summary,
+    })
+}
+
 pub fn verify_recursive_actual_pbs_chain_chunk_proof(
     instance: &ActualPbsChainChunkInstance,
     proof: &RecursiveActualPbsChainChunkProof,
@@ -724,6 +886,21 @@ pub fn verify_private_recursive_actual_pbs_chain_chunk_statement_proof(
 ) -> Result<(), ProofError> {
     verify_actual_pbs_chain_chunk_statement_proof(statement, &proof.base)?;
     let expected_summary = ActualPbsChainSummary::from_chunk_statement(statement)?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_recursive_batch_with_private_leaf_summary(
+        &proof.chain_summary.field_values(),
+        &proof.recursion,
+    )
+}
+
+pub fn verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof(
+    statement: &ActualPbsChainChunkStatement,
+    proof: &CompactRecursiveActualPbsChainChunkProof,
+) -> Result<(), ProofError> {
+    verify_actual_pbs_chain_chunk_statement_proof(statement, &proof.base)?;
+    let expected_summary = CompactActualPbsChainSummary::from_chunk_statement(statement)?;
     if proof.chain_summary != expected_summary {
         return Err(ProofError::StatementMismatch);
     }
@@ -818,6 +995,25 @@ pub fn prove_private_aggregated_recursive_actual_pbs_chain_node_pair(
     })
 }
 
+pub fn prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair(
+    left: CompactRecursiveActualPbsChainNode<'_>,
+    right: CompactRecursiveActualPbsChainNode<'_>,
+) -> Result<CompactAggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let chain_summary =
+        CompactActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    let aggregation = recursive::prove_private_aggregate_batch_proofs_with_chain_summary(
+        left.batch_proof(),
+        right.batch_proof(),
+        &chain_summary.field_values(),
+        Some(&compact_chain_summary_layout()),
+    )?;
+
+    Ok(CompactAggregatedRecursiveActualPbsChainNodeProof {
+        chain_summary,
+        aggregation,
+    })
+}
+
 pub fn verify_aggregated_recursive_actual_pbs_chain_node_pair_proof(
     left: RecursiveActualPbsChainNode<'_>,
     right: RecursiveActualPbsChainNode<'_>,
@@ -825,6 +1021,24 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_node_pair_proof(
 ) -> Result<(), ProofError> {
     let expected_summary =
         ActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_summary_for_child_proofs(
+        left.batch_proof(),
+        right.batch_proof(),
+        &proof.chain_summary.field_values(),
+        &proof.aggregation,
+    )
+}
+
+pub fn verify_private_compact_aggregated_recursive_actual_pbs_chain_node_pair_proof(
+    left: CompactRecursiveActualPbsChainNode<'_>,
+    right: CompactRecursiveActualPbsChainNode<'_>,
+    proof: &CompactAggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<(), ProofError> {
+    let expected_summary =
+        CompactActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
     if proof.chain_summary != expected_summary {
         return Err(ProofError::StatementMismatch);
     }
@@ -894,6 +1108,20 @@ pub fn combine_actual_pbs_chain_summaries(
         .clone();
     for next in summaries {
         summary = ActualPbsChainSummary::combine(&summary, next)?;
+    }
+    Ok(summary)
+}
+
+pub fn combine_compact_actual_pbs_chain_summaries(
+    summaries: &[CompactActualPbsChainSummary],
+) -> Result<CompactActualPbsChainSummary, ProofError> {
+    let mut summaries = summaries.iter();
+    let mut summary = summaries
+        .next()
+        .ok_or(ProofError::StatementMismatch)?
+        .clone();
+    for next in summaries {
+        summary = CompactActualPbsChainSummary::combine(&summary, next)?;
     }
     Ok(summary)
 }
@@ -1132,9 +1360,35 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
     )
 }
 
+pub fn verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+    summary: &CompactActualPbsChainSummary,
+    proof: &CompactAggregatedRecursiveActualPbsChainRootProof,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_public_summary(
+        &proof.root,
+        &summary.field_values(),
+    )
+}
+
 pub fn verify_aggregated_recursive_actual_pbs_chain_node_summary_proof(
     summary: &ActualPbsChainSummary,
     proof: &AggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_public_summary(
+        &proof.aggregation,
+        &summary.field_values(),
+    )
+}
+
+pub fn verify_compact_aggregated_recursive_actual_pbs_chain_node_summary_proof(
+    summary: &CompactActualPbsChainSummary,
+    proof: &CompactAggregatedRecursiveActualPbsChainNodeProof,
 ) -> Result<(), ProofError> {
     if &proof.chain_summary != summary {
         return Err(ProofError::StatementMismatch);
@@ -1183,6 +1437,21 @@ pub fn deserialize_aggregated_recursive_actual_pbs_chain_root_proof(
     Ok(proof)
 }
 
+pub fn serialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(
+    proof: &CompactAggregatedRecursiveActualPbsChainRootProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(
+    bytes: &[u8],
+) -> Result<CompactAggregatedRecursiveActualPbsChainRootProof, ProofError> {
+    let mut proof: CompactAggregatedRecursiveActualPbsChainRootProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    proof.root.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
 pub fn serialize_aggregated_recursive_actual_pbs_chain_node_proof(
     proof: &AggregatedRecursiveActualPbsChainNodeProof,
 ) -> Result<Vec<u8>, ProofError> {
@@ -1193,6 +1462,21 @@ pub fn deserialize_aggregated_recursive_actual_pbs_chain_node_proof(
     bytes: &[u8],
 ) -> Result<AggregatedRecursiveActualPbsChainNodeProof, ProofError> {
     let mut proof: AggregatedRecursiveActualPbsChainNodeProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    proof.aggregation.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
+pub fn serialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(
+    proof: &CompactAggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(
+    bytes: &[u8],
+) -> Result<CompactAggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let mut proof: CompactAggregatedRecursiveActualPbsChainNodeProof = postcard::from_bytes(bytes)
         .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
     proof.aggregation.rebuild_common_lookups()?;
     Ok(proof)
@@ -1231,6 +1515,22 @@ pub fn deserialize_recursive_actual_pbs_chain_chunk_proof(
     Ok(proof)
 }
 
+pub fn serialize_compact_recursive_actual_pbs_chain_chunk_proof(
+    proof: &CompactRecursiveActualPbsChainChunkProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_compact_recursive_actual_pbs_chain_chunk_proof(
+    bytes: &[u8],
+) -> Result<CompactRecursiveActualPbsChainChunkProof, ProofError> {
+    let mut proof: CompactRecursiveActualPbsChainChunkProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    rebuild_circuit_proof_common_lookups(&mut proof.base.proof)?;
+    proof.recursion.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
 fn validate_aggregation_leaf_count(leaf_count: usize) -> Result<(), ProofError> {
     if leaf_count < 2 {
         return Err(ProofError::StatementMismatch);
@@ -1256,6 +1556,14 @@ fn chain_summary_header_len() -> usize {
 
 fn chain_summary_field_count(params: &Params) -> usize {
     chain_summary_header_len() + chain_chunk_public_field_count(params)
+}
+
+fn compact_chain_summary_field_count() -> usize {
+    chain_summary_header_len() + compact_chain_summary_public_field_count()
+}
+
+fn compact_chain_summary_public_field_count() -> usize {
+    6 * SELECTOR_DIGEST_WIDTH
 }
 
 fn chain_chunk_public_field_count(params: &Params) -> usize {
@@ -1304,6 +1612,28 @@ fn chain_summary_layout(params: &Params) -> recursive::ChainSummaryLayout {
     }
 }
 
+fn compact_chain_summary_layout() -> recursive::ChainSummaryLayout {
+    let digest_len = SELECTOR_DIGEST_WIDTH;
+    let header_len = chain_summary_header_len();
+    let input_accumulator = header_len..header_len + digest_len;
+    let bsk_digest_in = input_accumulator.end..input_accumulator.end + digest_len;
+    let bsk_digest_out = bsk_digest_in.end..bsk_digest_in.end + digest_len;
+    let mask_digest_in = bsk_digest_out.end..bsk_digest_out.end + digest_len;
+    let mask_digest_out = mask_digest_in.end..mask_digest_in.end + digest_len;
+    let output_accumulator = mask_digest_out.end..mask_digest_out.end + digest_len;
+    recursive::ChainSummaryLayout {
+        params: 0..param_public_value_count(),
+        step_count: param_public_value_count(),
+        input_accumulator,
+        bsk_digest_in,
+        bsk_digest_out,
+        mask_digest_in,
+        mask_digest_out,
+        output_accumulator: output_accumulator.clone(),
+        len: output_accumulator.end,
+    }
+}
+
 struct ChunkStatementPublicView<'a> {
     input_accumulator: &'a [P3Goldilocks],
     bsk_digest_in: &'a [P3Goldilocks],
@@ -1323,6 +1653,12 @@ fn chunk_summary_public_view(
     summary: &ActualPbsChainSummary,
 ) -> Result<ChunkStatementPublicView<'_>, ProofError> {
     chunk_public_view(&summary.params, &summary.public_inputs)
+}
+
+fn compact_summary_public_view(
+    summary: &CompactActualPbsChainSummary,
+) -> Result<ChunkStatementPublicView<'_>, ProofError> {
+    compact_public_view(&summary.public_inputs)
 }
 
 fn chunk_public_view<'a>(
@@ -1358,6 +1694,49 @@ fn chunk_public_view<'a>(
         mask_digest_out,
         output_accumulator,
     })
+}
+
+fn compact_public_view<'a>(
+    public_inputs: &'a [P3Goldilocks],
+) -> Result<ChunkStatementPublicView<'a>, ProofError> {
+    let digest_len = SELECTOR_DIGEST_WIDTH;
+    let expected_len = compact_chain_summary_public_field_count();
+    if public_inputs.len() != expected_len {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    let inputs = public_inputs;
+    let mut offset = 0usize;
+    let input_accumulator = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let bsk_digest_in = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let bsk_digest_out = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let mask_digest_in = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let mask_digest_out = &inputs[offset..offset + digest_len];
+    offset += digest_len;
+    let output_accumulator = &inputs[offset..offset + digest_len];
+
+    Ok(ChunkStatementPublicView {
+        input_accumulator,
+        bsk_digest_in,
+        bsk_digest_out,
+        mask_digest_in,
+        mask_digest_out,
+        output_accumulator,
+    })
+}
+
+fn compact_accumulator_digest(values: &[P3Goldilocks]) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    let digest = digest_update_from_values(
+        digest_initial_state(COMPACT_ACCUMULATOR_DIGEST_TAG),
+        values
+            .iter()
+            .map(|value| Goldilocks::new_canonical(value.as_canonical_u64())),
+    );
+    digest.map(|value| P3Goldilocks::from_u64(value.value()))
 }
 
 #[derive(Clone, Copy)]
@@ -1920,6 +2299,29 @@ mod tests {
         assert_eq!(
             combined_summary.public_inputs[..2 * params.polynomial_size],
             statements[0].public_inputs[..2 * params.polynomial_size]
+        );
+
+        let first_compact =
+            CompactActualPbsChainSummary::from_chunk_statement(&statements[0]).unwrap();
+        let second_compact =
+            CompactActualPbsChainSummary::from_chunk_statement(&statements[1]).unwrap();
+        let combined_compact =
+            CompactActualPbsChainSummary::combine(&first_compact, &second_compact).unwrap();
+        assert_eq!(combined_compact.step_count, params.lwe_dimension);
+        assert_eq!(
+            combined_compact.field_values().len(),
+            compact_chain_summary_field_count()
+        );
+        assert_eq!(
+            combined_compact,
+            CompactActualPbsChainSummary::from_full_summary(&combined_summary).unwrap()
+        );
+
+        let mut mismatched_compact = second_compact;
+        mismatched_compact.public_inputs[0] += P3Goldilocks::ONE;
+        assert_eq!(
+            CompactActualPbsChainSummary::combine(&first_compact, &mismatched_compact),
+            Err(ProofError::StatementMismatch)
         );
 
         let mut mismatched_accumulator = statements.clone();

@@ -26,6 +26,12 @@ use p3_recursion::verifier::{
     verify_p3_batch_proof_circuit, verify_p3_batch_proof_circuit_private_inputs, VerificationError,
 };
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use tfheprus_circuits::{
+    digest_initial_state, selector_digest_absorb_coeff, selector_digest_round_const,
+    SELECTOR_DIGEST_CHUNK_SIZE, SELECTOR_DIGEST_MDS, SELECTOR_DIGEST_MIX_ROUNDS,
+    SELECTOR_DIGEST_WIDTH,
+};
+use tfheprus_core::Goldilocks;
 
 use crate::range_check::{
     proof_range_check_bit_counts, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
@@ -55,6 +61,8 @@ type InnerFri = p3_recursion::pcs::FriProofTargets<
 >;
 type VerifierInputs =
     BatchStarkVerifierInputsBuilder<GoldilocksConfig, MerkleCapTargets<F, 4>, InnerFri>;
+
+const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChainSummaryLayout {
@@ -230,6 +238,89 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
     })?;
     let traces = runner.run().map_err(|error| {
         ProofError::Plonky3(format!("run private recursive verifier circuit: {error:?}"))
+    })?;
+
+    let preprocessors = recursive_verifier_preprocessors();
+    let air_builders = recursive_verifier_air_builders();
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
+            &verification_circuit,
+            &table_packing,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let circuit_prover_data =
+        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+
+    let prover = recursive_verifier_prover(config, table_packing);
+    let recursive_proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+    Ok(RecursiveBatchProof {
+        public_inputs,
+        proof: recursive_proof,
+    })
+}
+
+pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<RecursiveBatchProof, ProofError> {
+    let config = goldilocks_config();
+    let table_packing = TablePacking::default();
+    let table_public_inputs = table_public_inputs(proof);
+    let (verification_circuit, verifier_inputs, mmcs_op_ids) =
+        build_private_verifier_circuit_with_compact_leaf_summary(
+            proof,
+            &config,
+            summary,
+            chunk_public_offset,
+            full_layout,
+            compact_layout,
+        )?;
+    let public_inputs = summary_public_inputs(summary);
+    let private_inputs = verifier_inputs.pack_private_verifier_values(
+        &table_public_inputs,
+        &proof.proof,
+        &proof.stark_common,
+    );
+    assert_public_ops_have_rows(&verification_circuit)?;
+    let mut runner = verification_circuit.runner();
+    runner.set_public_inputs(&public_inputs).map_err(|error| {
+        ProofError::Plonky3(format!(
+            "set private compact recursive public inputs: {error:?}"
+        ))
+    })?;
+    runner
+        .set_private_inputs(&private_inputs)
+        .map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set private compact recursive verifier inputs: {error:?}"
+            ))
+        })?;
+    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        &mut runner,
+        &mmcs_op_ids,
+        &proof.proof.opening_proof,
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    )
+    .map_err(|error| {
+        ProofError::Plonky3(format!(
+            "set private compact recursive FRI private data: {error}"
+        ))
+    })?;
+    let traces = runner.run().map_err(|error| {
+        ProofError::Plonky3(format!(
+            "run private compact recursive verifier circuit: {error:?}"
+        ))
     })?;
 
     let preprocessors = recursive_verifier_preprocessors();
@@ -597,6 +688,44 @@ fn build_private_verifier_circuit_with_leaf_summary(
     Ok((circuit, verifier_inputs, mmcs_op_ids))
 }
 
+fn build_private_verifier_circuit_with_compact_leaf_summary(
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    config: &GoldilocksConfig,
+    summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<
+    (
+        Circuit<Challenge>,
+        VerifierInputs,
+        Vec<p3_circuit::NonPrimitiveOpId>,
+    ),
+    ProofError,
+> {
+    let mut builder = CircuitBuilder::<Challenge>::new();
+    enable_recursive_verifier_ops(&mut builder);
+
+    let base_table_provers = base_table_provers(proof);
+    let (verifier_inputs, mmcs_op_ids) =
+        add_private_batch_verifier_to_builder(&mut builder, proof, config, &base_table_provers)?;
+    let summary_targets = allocate_summary_public_inputs(&mut builder, summary.len());
+    constrain_compact_leaf_summary(
+        &mut builder,
+        &verifier_inputs,
+        &summary_targets,
+        summary,
+        chunk_public_offset,
+        full_layout,
+        compact_layout,
+    )?;
+    let circuit = builder
+        .build()
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+    Ok((circuit, verifier_inputs, mmcs_op_ids))
+}
+
 type AggregationVerifierCircuit = (
     Circuit<Challenge>,
     VerifierInputs,
@@ -753,6 +882,104 @@ fn constrain_leaf_summary(
     for (&summary_target, &chunk_target) in chunk_summary_targets.iter().zip(chunk_public_targets) {
         assert_equal(builder, summary_target, chunk_target);
     }
+
+    Ok(())
+}
+
+fn constrain_compact_leaf_summary(
+    builder: &mut CircuitBuilder<Challenge>,
+    verifier_inputs: &VerifierInputs,
+    summary_targets: &[ExprId],
+    summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<(), ProofError> {
+    validate_summary_layout(full_layout)?;
+    validate_summary_layout(compact_layout)?;
+    if summary_targets.len() != summary.len()
+        || summary_targets.len() != compact_layout.len
+        || chunk_public_offset > summary.len()
+        || chunk_public_offset > full_layout.len
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    for (target, &value) in summary_targets[..chunk_public_offset]
+        .iter()
+        .zip(summary.iter())
+    {
+        let value = builder.define_const(Challenge::from(value));
+        assert_equal(builder, *target, value);
+    }
+
+    let chunk_public_targets = public_air_targets(verifier_inputs)?;
+    let input_accumulator = summary_range_to_chunk_range(
+        full_layout.input_accumulator.clone(),
+        chunk_public_offset,
+        chunk_public_targets.len(),
+    )?;
+    let output_accumulator = summary_range_to_chunk_range(
+        full_layout.output_accumulator.clone(),
+        chunk_public_offset,
+        chunk_public_targets.len(),
+    )?;
+
+    let input_digest = digest_targets_from_values(
+        builder,
+        COMPACT_ACCUMULATOR_DIGEST_TAG,
+        chunk_public_targets[input_accumulator].iter().copied(),
+    );
+    let output_digest = digest_targets_from_values(
+        builder,
+        COMPACT_ACCUMULATOR_DIGEST_TAG,
+        chunk_public_targets[output_accumulator].iter().copied(),
+    );
+
+    connect_summary_range_to_digest(
+        builder,
+        summary_targets,
+        compact_layout.input_accumulator.clone(),
+        &input_digest,
+    )?;
+    connect_summary_range_to_chunk_range(
+        builder,
+        summary_targets,
+        compact_layout.bsk_digest_in.clone(),
+        chunk_public_targets,
+        full_layout.bsk_digest_in.clone(),
+        chunk_public_offset,
+    )?;
+    connect_summary_range_to_chunk_range(
+        builder,
+        summary_targets,
+        compact_layout.bsk_digest_out.clone(),
+        chunk_public_targets,
+        full_layout.bsk_digest_out.clone(),
+        chunk_public_offset,
+    )?;
+    connect_summary_range_to_chunk_range(
+        builder,
+        summary_targets,
+        compact_layout.mask_digest_in.clone(),
+        chunk_public_targets,
+        full_layout.mask_digest_in.clone(),
+        chunk_public_offset,
+    )?;
+    connect_summary_range_to_chunk_range(
+        builder,
+        summary_targets,
+        compact_layout.mask_digest_out.clone(),
+        chunk_public_targets,
+        full_layout.mask_digest_out.clone(),
+        chunk_public_offset,
+    )?;
+    connect_summary_range_to_digest(
+        builder,
+        summary_targets,
+        compact_layout.output_accumulator.clone(),
+        &output_digest,
+    )?;
 
     Ok(())
 }
@@ -970,6 +1197,150 @@ fn connect_ranges(
         assert_equal(builder, left[left_index], right[right_index]);
     }
     Ok(())
+}
+
+fn connect_summary_range_to_chunk_range(
+    builder: &mut CircuitBuilder<Challenge>,
+    summary_targets: &[ExprId],
+    summary_range: Range<usize>,
+    chunk_public_targets: &[ExprId],
+    full_summary_range: Range<usize>,
+    chunk_public_offset: usize,
+) -> Result<(), ProofError> {
+    let chunk_range = summary_range_to_chunk_range(
+        full_summary_range,
+        chunk_public_offset,
+        chunk_public_targets.len(),
+    )?;
+    connect_ranges(
+        builder,
+        summary_targets,
+        summary_range,
+        chunk_public_targets,
+        chunk_range,
+    )
+}
+
+fn connect_summary_range_to_digest(
+    builder: &mut CircuitBuilder<Challenge>,
+    summary_targets: &[ExprId],
+    summary_range: Range<usize>,
+    digest_targets: &[ExprId; SELECTOR_DIGEST_WIDTH],
+) -> Result<(), ProofError> {
+    connect_ranges(
+        builder,
+        summary_targets,
+        summary_range,
+        digest_targets,
+        0..SELECTOR_DIGEST_WIDTH,
+    )
+}
+
+fn summary_range_to_chunk_range(
+    summary_range: Range<usize>,
+    chunk_public_offset: usize,
+    chunk_public_len: usize,
+) -> Result<Range<usize>, ProofError> {
+    let start = summary_range
+        .start
+        .checked_sub(chunk_public_offset)
+        .ok_or(ProofError::StatementMismatch)?;
+    let end = summary_range
+        .end
+        .checked_sub(chunk_public_offset)
+        .ok_or(ProofError::StatementMismatch)?;
+    if start > end || end > chunk_public_len {
+        return Err(ProofError::StatementMismatch);
+    }
+    Ok(start..end)
+}
+
+fn digest_targets_from_values(
+    builder: &mut CircuitBuilder<Challenge>,
+    tag: u64,
+    values: impl IntoIterator<Item = ExprId>,
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    let initial_state = digest_initial_state(tag);
+    let mut state =
+        core::array::from_fn(|lane| builder.define_const(challenge_from_core(initial_state[lane])));
+    let mut count = 0usize;
+
+    for value in values {
+        selector_digest_absorb_target(builder, &mut state, count, value);
+        count += 1;
+        if count.is_multiple_of(SELECTOR_DIGEST_CHUNK_SIZE) {
+            selector_digest_mix_targets(builder, &mut state, count);
+        }
+    }
+
+    let count_const = builder.define_const(Challenge::from(F::from_u64(count as u64)));
+    state[0] = builder.add(state[0], count_const);
+    selector_digest_mix_targets(builder, &mut state, count);
+    state
+}
+
+fn selector_digest_absorb_target(
+    builder: &mut CircuitBuilder<Challenge>,
+    state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
+    index: usize,
+    value: ExprId,
+) {
+    let lane = index % SELECTOR_DIGEST_WIDTH;
+    let term = mul_core_const_target(builder, value, selector_digest_absorb_coeff(index, lane));
+    state[lane] = builder.add(state[lane], term);
+}
+
+fn selector_digest_mix_targets(
+    builder: &mut CircuitBuilder<Challenge>,
+    state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
+    domain: usize,
+) {
+    for round in 0..SELECTOR_DIGEST_MIX_ROUNDS {
+        let powered = core::array::from_fn(|lane| {
+            let round_const = builder.define_const(challenge_from_core(
+                selector_digest_round_const(domain, round, lane),
+            ));
+            let shifted = builder.add(state[lane], round_const);
+            pow7_target(builder, shifted)
+        });
+        *state = selector_digest_mds_targets(builder, &powered);
+    }
+}
+
+fn selector_digest_mds_targets(
+    builder: &mut CircuitBuilder<Challenge>,
+    values: &[ExprId; SELECTOR_DIGEST_WIDTH],
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    core::array::from_fn(|row| {
+        let zero = builder.define_const(Challenge::from(F::ZERO));
+        values
+            .iter()
+            .zip(SELECTOR_DIGEST_MDS[row].iter())
+            .fold(zero, |acc, (&value, &coeff)| {
+                let term = mul_core_const_target(builder, value, Goldilocks::from_u64(coeff));
+                builder.add(acc, term)
+            })
+    })
+}
+
+fn pow7_target(builder: &mut CircuitBuilder<Challenge>, value: ExprId) -> ExprId {
+    let squared = builder.mul(value, value);
+    let fourth = builder.mul(squared, squared);
+    let sixth = builder.mul(fourth, squared);
+    builder.mul(sixth, value)
+}
+
+fn mul_core_const_target(
+    builder: &mut CircuitBuilder<Challenge>,
+    value: ExprId,
+    coeff: Goldilocks,
+) -> ExprId {
+    let coeff = builder.define_const(challenge_from_core(coeff));
+    builder.mul(value, coeff)
+}
+
+fn challenge_from_core(value: Goldilocks) -> Challenge {
+    Challenge::from(F::from_u64(value.value()))
 }
 
 fn assert_equal(builder: &mut CircuitBuilder<Challenge>, left: ExprId, right: ExprId) {

@@ -22,6 +22,9 @@ use tfheprus_prover::{
     deserialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     deserialize_aggregated_recursive_actual_pbs_chain_node_proof,
     deserialize_aggregated_recursive_actual_pbs_chain_root_proof,
+    deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof,
+    deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof,
+    deserialize_compact_recursive_actual_pbs_chain_chunk_proof,
     deserialize_recursive_actual_pbs_chain_chunk_proof, prove_actual_pbs,
     prove_actual_pbs_chain_chunk, prove_actual_pbs_step, prove_actual_pbs_step_chain,
     prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
@@ -29,21 +32,30 @@ use tfheprus_prover::{
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_mul_xai, prove_poly_mul,
     prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
+    prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair,
+    prove_private_compact_recursive_actual_pbs_chain_chunk,
     prove_private_recursive_actual_pbs_chain_chunk, prove_recursive_actual_pbs_chain_chunk,
     prove_sample_extract, serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     serialize_aggregated_recursive_actual_pbs_chain_node_proof,
     serialize_aggregated_recursive_actual_pbs_chain_root_proof,
+    serialize_compact_aggregated_recursive_actual_pbs_chain_node_proof,
+    serialize_compact_aggregated_recursive_actual_pbs_chain_root_proof,
+    serialize_compact_recursive_actual_pbs_chain_chunk_proof,
     serialize_recursive_actual_pbs_chain_chunk_proof, verify_actual_pbs_chain_chunk_proof,
     verify_actual_pbs_proof, verify_actual_pbs_step_chain_proof,
     verify_actual_pbs_step_private_proof, verify_actual_pbs_step_proof,
     verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof,
     verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof,
     verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof,
-    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
-    verify_poly_mul_proof, verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof,
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
+    verify_poly_mul_proof, verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
+    verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
     ActualPbsChainChunkStatement, ActualPbsChainSummary,
-    AggregatedRecursiveActualPbsChainNodeProof, RecursiveActualPbsChainChunkProof,
+    AggregatedRecursiveActualPbsChainNodeProof, CompactActualPbsChainSummary,
+    CompactAggregatedRecursiveActualPbsChainNodeProof, CompactRecursiveActualPbsChainChunkProof,
+    CompactRecursiveActualPbsChainNode, RecursiveActualPbsChainChunkProof,
     RecursiveActualPbsChainNode,
 };
 
@@ -137,6 +149,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 false,
             )?
         }
+        Some("prove-pbs-chain-private-leaves-compact-fast") => {
+            prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
+                parse_preset_arg(&args)?,
+                parse_chunk_step_count_arg(&args)?,
+                parse_required_chunk_count_arg(&args)?,
+                parse_required_arg(&args, 5, "leaf artifact output directory")?,
+                false,
+            )?
+        }
         Some("aggregate-pbs-chain-leaves-recursive") => {
             aggregate_pbs_chain_leaf_artifacts_recursive_demo(
                 parse_required_arg(&args, 2, "root artifact output path")?,
@@ -159,6 +180,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 true,
             )?
         }
+        Some("aggregate-pbs-chain-private-compact-leaf-dir-recursive") => {
+            aggregate_pbs_chain_private_compact_leaf_artifact_dir_recursive_demo(
+                parse_required_arg(&args, 2, "root artifact output path")?,
+                parse_required_arg(&args, 3, "leaf artifact directory")?,
+                parse_optional_leaf_count_arg(&args)?,
+            )?
+        }
         Some("package-pbs-chain-frontier-recursive") => {
             package_pbs_chain_frontier_artifacts_recursive_demo(
                 parse_required_arg(&args, 2, "frontier artifact output path")?,
@@ -173,6 +201,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Some("verify-pbs-chain-root-artifact-recursive") => {
             verify_pbs_chain_root_artifact_recursive_demo(parse_required_arg(
+                &args,
+                2,
+                "root artifact path",
+            )?)?
+        }
+        Some("verify-pbs-chain-compact-root-artifact-recursive") => {
+            verify_pbs_chain_compact_root_artifact_recursive_demo(parse_required_arg(
                 &args,
                 2,
                 "root artifact path",
@@ -1265,6 +1300,178 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
     Ok(())
 }
 
+fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    chunk_count: usize,
+    output_dir: &str,
+    verify_leaf_artifacts: bool,
+) -> Result<(), Box<dyn Error>> {
+    if chunk_count < 2 {
+        return Err("chunk count must be at least 2".into());
+    }
+    let params = preset.params();
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?;
+    if total_steps == 0 || total_steps > params.lwe_dimension {
+        return Err(format!(
+            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    fs::create_dir_all(output_dir)?;
+    let output_dir = Path::new(output_dir);
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
+    let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
+    let initial_exponent = (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+    let mut accumulator = GlweCiphertext::trivial(
+        test_polynomial.poly.mul_xai(initial_exponent),
+        params.glwe_dimension,
+    );
+    let mut bsk_digest = pbs_bsk_digest_initial();
+    let mut mask_digest = pbs_mask_digest_initial();
+    let mut total_prove_time = Duration::ZERO;
+    let mut total_verify_time = Duration::ZERO;
+    let mut written_count = 0usize;
+    let mut reused_count = 0usize;
+    let mut max_base_private_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+    let mut total_artifact_bytes = 0usize;
+
+    for chunk_index in 0..chunk_count {
+        let chunk_start = chunk_index * chunk_step_count;
+        let chunk_end = chunk_start + chunk_step_count;
+        let instance = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[chunk_start..chunk_end].to_vec(),
+            accumulator.clone(),
+            evaluation_key.bootstrapping_key[chunk_start..chunk_end].to_vec(),
+            bsk_digest,
+            mask_digest,
+        );
+        let base_private_inputs = instance.private_inputs().len();
+        let statement = ActualPbsChainChunkStatement::from_instance(&instance);
+        let expected_summary = CompactActualPbsChainSummary::from_chunk_statement(&statement)?;
+        let artifact_path = output_dir.join(format!("leaf-{chunk_index:05}.bin"));
+
+        let (proof, artifact_len, action, prove_time, verify_time) = if artifact_path.exists() {
+            let bytes = fs::read(&artifact_path)?;
+            let proof = deserialize_compact_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+            let verify_time = if verify_leaf_artifacts {
+                let verify_started = Instant::now();
+                verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof(
+                    &statement, &proof,
+                )
+                .map_err(|error| {
+                    format!(
+                        "existing compact leaf artifact {} failed verification: {error}",
+                        artifact_path.display()
+                    )
+                })?;
+                verify_started.elapsed()
+            } else {
+                if proof.chain_summary != expected_summary {
+                    return Err(format!(
+                        "existing compact leaf artifact {} has wrong chain summary",
+                        artifact_path.display()
+                    )
+                    .into());
+                }
+                Duration::ZERO
+            };
+            (proof, bytes.len(), "reused", Duration::ZERO, verify_time)
+        } else {
+            let prove_started = Instant::now();
+            let proof = prove_private_compact_recursive_actual_pbs_chain_chunk(&instance)?;
+            let prove_time = prove_started.elapsed();
+            let verify_time = if verify_leaf_artifacts {
+                let verify_started = Instant::now();
+                verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof(
+                    &statement, &proof,
+                )?;
+                verify_started.elapsed()
+            } else {
+                if proof.chain_summary != expected_summary {
+                    return Err("new compact leaf proof has wrong chain summary".into());
+                }
+                Duration::ZERO
+            };
+            let artifact = serialize_compact_recursive_actual_pbs_chain_chunk_proof(&proof)?;
+            fs::write(&artifact_path, &artifact)?;
+            (proof, artifact.len(), "written", prove_time, verify_time)
+        };
+
+        if action == "written" {
+            written_count += 1;
+        } else {
+            reused_count += 1;
+        }
+        total_prove_time += prove_time;
+        total_verify_time += verify_time;
+        total_artifact_bytes += artifact_len;
+        max_base_private_inputs = max_base_private_inputs.max(base_private_inputs);
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(proof.recursion.public_input_count());
+        accumulator = instance.output_accumulator;
+        bsk_digest = instance.bsk_digest_out;
+        mask_digest = instance.mask_digest_out;
+
+        println!(
+            "pbs-chain private compact recursive leaf artifact {action}: preset={}, verify_leaf_artifacts={}, chunk={}, steps={}..{}, artifact={}, artifact_bytes={}, prove_us={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}, compact_summary_fields={}",
+            preset.name(),
+            verify_leaf_artifacts,
+            chunk_index,
+            chunk_start,
+            chunk_end,
+            artifact_path.display(),
+            artifact_len,
+            prove_time.as_micros(),
+            verify_time.as_micros(),
+            base_private_inputs,
+            proof.recursion.public_input_count(),
+            proof.chain_summary.field_values().len()
+        );
+    }
+
+    if total_steps == params.lwe_dimension {
+        let evaluation_key_ntt = evaluation_key.to_ntt();
+        let native_output =
+            bootstrap_without_keyswitch_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
+        let chunked_output = sample_extract_index_zero(&accumulator);
+        assert_eq!(chunked_output, native_output);
+        println!(
+            "full_compact_leaf_checkpoint_output_message={}",
+            chunked_output.decrypt(&params, &sk.extracted_output_lwe_key())
+        );
+    }
+
+    println!(
+        "pbs-chain private compact recursive leaf artifacts ready: preset={}, verify_leaf_artifacts={}, chunk_steps={}, chunk_count={}, total_steps={}, output_dir={}, written={}, reused={}, total_artifact_bytes={}, total_prove_ms={}, total_prove_us={}, total_verify_ms={}, total_verify_us={}, max_base_private_inputs={}, max_recursive_public_inputs={}, bsk_digest_out={}, mask_digest_out={}",
+        preset.name(),
+        verify_leaf_artifacts,
+        chunk_step_count,
+        chunk_count,
+        total_steps,
+        output_dir.display(),
+        written_count,
+        reused_count,
+        total_artifact_bytes,
+        total_prove_time.as_millis(),
+        total_prove_time.as_micros(),
+        total_verify_time.as_millis(),
+        total_verify_time.as_micros(),
+        max_base_private_inputs,
+        max_recursive_public_inputs,
+        format_coefficients(&bsk_digest),
+        format_coefficients(&mask_digest)
+    );
+
+    Ok(())
+}
+
 fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
     output_path: &str,
     leaf_paths: Vec<String>,
@@ -1391,6 +1598,20 @@ fn aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
         leaf_paths,
         &checkpoint_dir,
         private_recursive,
+    )
+}
+
+fn aggregate_pbs_chain_private_compact_leaf_artifact_dir_recursive_demo(
+    output_path: &str,
+    leaf_dir: &str,
+    leaf_count: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    let leaf_paths = leaf_artifact_paths_from_dir(leaf_dir, leaf_count)?;
+    let checkpoint_dir = Path::new(leaf_dir).join("private-compact-aggregation");
+    aggregate_pbs_chain_private_compact_leaf_artifacts_checkpointed_recursive_demo(
+        output_path,
+        leaf_paths,
+        &checkpoint_dir,
     )
 }
 
@@ -1642,6 +1863,270 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
     Ok(())
 }
 
+#[derive(Clone)]
+enum CompactRecursivePbsChainNodeArtifact {
+    Leaf(PathBuf),
+    Aggregate(PathBuf),
+}
+
+enum LoadedCompactRecursivePbsChainNode {
+    Leaf(Box<CompactRecursiveActualPbsChainChunkProof>),
+    Aggregate(Box<CompactAggregatedRecursiveActualPbsChainNodeProof>),
+}
+
+impl CompactRecursivePbsChainNodeArtifact {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Leaf(path) | Self::Aggregate(path) => path,
+        }
+    }
+}
+
+impl LoadedCompactRecursivePbsChainNode {
+    fn chain_summary(&self) -> &CompactActualPbsChainSummary {
+        match self {
+            Self::Leaf(proof) => &proof.chain_summary,
+            Self::Aggregate(proof) => &proof.chain_summary,
+        }
+    }
+
+    fn as_prover_node(&self) -> CompactRecursiveActualPbsChainNode<'_> {
+        match self {
+            Self::Leaf(proof) => CompactRecursiveActualPbsChainNode::Leaf(proof),
+            Self::Aggregate(proof) => CompactRecursiveActualPbsChainNode::Aggregate(proof),
+        }
+    }
+}
+
+fn aggregate_pbs_chain_private_compact_leaf_artifacts_checkpointed_recursive_demo(
+    output_path: &str,
+    leaf_paths: Vec<String>,
+    checkpoint_dir: &Path,
+) -> Result<(), Box<dyn Error>> {
+    if leaf_paths.len() < 2 {
+        return Err("at least two compact leaf artifacts are required".into());
+    }
+
+    fs::create_dir_all(checkpoint_dir)?;
+    let read_started = Instant::now();
+    let mut statements = Vec::with_capacity(leaf_paths.len());
+    let mut current_nodes = Vec::with_capacity(leaf_paths.len());
+    let mut current_summaries = Vec::with_capacity(leaf_paths.len());
+    let mut total_leaf_artifact_bytes = 0usize;
+    let mut max_base_public_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+    for path in leaf_paths {
+        let path = PathBuf::from(path);
+        let bytes = fs::read(&path)?;
+        total_leaf_artifact_bytes = total_leaf_artifact_bytes
+            .checked_add(bytes.len())
+            .ok_or("compact leaf artifact byte count overflow")?;
+        let leaf = deserialize_compact_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+        max_base_public_inputs = max_base_public_inputs.max(leaf.base.public_inputs.len());
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(leaf.recursion.public_input_count());
+        statements.push(leaf.base.public_statement());
+        current_summaries.push(leaf.chain_summary.clone());
+        current_nodes.push(CompactRecursivePbsChainNodeArtifact::Leaf(path));
+    }
+    tfheprus_prover::validate_actual_pbs_chain_chunk_statements(&statements)
+        .map_err(|error| format!("compact leaf artifact continuity check failed: {error}"))?;
+    let read_time = read_started.elapsed();
+
+    let mut layer_sizes = Vec::new();
+    let mut written_count = 0usize;
+    let mut reused_count = 0usize;
+    let mut total_aggregate_time = Duration::ZERO;
+    let mut total_aggregate_artifact_bytes = 0usize;
+    let leaf_count = current_nodes.len();
+
+    let mut layer_index = 0usize;
+    while current_nodes.len() > 1 {
+        let pair_count = current_nodes.len() / 2;
+        let layer_dir = checkpoint_dir.join(format!("layer-{layer_index:03}"));
+        fs::create_dir_all(&layer_dir)?;
+        let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        let mut next_summaries = Vec::with_capacity(current_summaries.len().div_ceil(2));
+        layer_sizes.push(pair_count);
+
+        for node_index in 0..pair_count {
+            let output_node_path = layer_dir.join(format!("agg-{node_index:05}.bin"));
+            let expected_summary = CompactActualPbsChainSummary::combine(
+                &current_summaries[node_index * 2],
+                &current_summaries[node_index * 2 + 1],
+            )?;
+
+            if output_node_path.exists() {
+                let bytes = fs::read(&output_node_path)?;
+                total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
+                    .checked_add(bytes.len())
+                    .ok_or("compact aggregate artifact byte count overflow")?;
+                let proof =
+                    deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(&bytes)?;
+                if proof.chain_summary != expected_summary {
+                    return Err(format!(
+                        "stale compact aggregate checkpoint has wrong summary: {}",
+                        output_node_path.display()
+                    )
+                    .into());
+                }
+                reused_count += 1;
+                eprintln!(
+                    "reused pbs-chain compact aggregate checkpoint: layer={}, node={}, artifact={}, bytes={}",
+                    layer_index,
+                    node_index,
+                    output_node_path.display(),
+                    bytes.len()
+                );
+            } else {
+                let left = load_compact_recursive_pbs_chain_node(&current_nodes[node_index * 2])?;
+                let right =
+                    load_compact_recursive_pbs_chain_node(&current_nodes[node_index * 2 + 1])?;
+                if left.chain_summary() != &current_summaries[node_index * 2]
+                    || right.chain_summary() != &current_summaries[node_index * 2 + 1]
+                {
+                    return Err("compact node summary changed while aggregating checkpoints".into());
+                }
+                let aggregate_started = Instant::now();
+                let proof = prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair(
+                    left.as_prover_node(),
+                    right.as_prover_node(),
+                )?;
+                let aggregate_time = aggregate_started.elapsed();
+                total_aggregate_time += aggregate_time;
+                if proof.chain_summary != expected_summary {
+                    return Err("compact aggregate proof summary mismatch".into());
+                }
+                let bytes =
+                    serialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(&proof)?;
+                write_artifact_atomic(&output_node_path, &bytes)?;
+                total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
+                    .checked_add(bytes.len())
+                    .ok_or("compact aggregate artifact byte count overflow")?;
+                written_count += 1;
+                eprintln!(
+                    "wrote pbs-chain compact aggregate checkpoint: layer={}, node={}, artifact={}, bytes={}, aggregate_us={}",
+                    layer_index,
+                    node_index,
+                    output_node_path.display(),
+                    bytes.len(),
+                    aggregate_time.as_micros()
+                );
+            }
+
+            next_nodes.push(CompactRecursivePbsChainNodeArtifact::Aggregate(
+                output_node_path,
+            ));
+            next_summaries.push(expected_summary);
+        }
+
+        if current_nodes.len() % 2 == 1 {
+            next_nodes.push(
+                current_nodes
+                    .last()
+                    .ok_or("missing carried compact aggregate node")?
+                    .clone(),
+            );
+            next_summaries.push(
+                current_summaries
+                    .last()
+                    .ok_or("missing carried compact aggregate summary")?
+                    .clone(),
+            );
+        }
+
+        current_nodes = next_nodes;
+        current_summaries = next_summaries;
+        layer_index += 1;
+    }
+
+    let final_node = current_nodes
+        .pop()
+        .ok_or("missing final compact aggregate checkpoint")?;
+    let root_summary = current_summaries
+        .pop()
+        .ok_or("missing final compact aggregate summary")?;
+    let CompactRecursivePbsChainNodeArtifact::Aggregate(final_node_path) = final_node else {
+        return Err("final compact node must be an aggregate proof".into());
+    };
+    let final_node_bytes = fs::read(&final_node_path)?;
+    let final_node_proof =
+        deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(&final_node_bytes)?;
+    if final_node_proof.chain_summary != root_summary {
+        return Err("final compact aggregate summary mismatch".into());
+    }
+    let root_table_count = final_node_proof.table_count();
+    let root_public_input_count = final_node_proof.public_input_count();
+    let compact_summary_fields = final_node_proof.chain_summary.field_values().len();
+    let root_proof = final_node_proof.into_root_proof();
+    let root_artifact =
+        serialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof)?;
+    let decoded_root_proof =
+        deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&root_artifact)?;
+    let root_verify_started = Instant::now();
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root_summary,
+        &decoded_root_proof,
+    )?;
+    let root_verify_time = root_verify_started.elapsed();
+    write_artifact_atomic(Path::new(output_path), &root_artifact)?;
+
+    let layer_sizes = layer_sizes
+        .iter()
+        .map(|size| size.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "pbs-chain compact leaf artifacts checkpoint-aggregated: output={}, checkpoint_dir={}, leaves={}, layers={}, layer_sizes=[{}], aggregation_nodes={}, written={}, reused={}, root_tables={}, root_public_inputs={}, compact_summary_fields={}",
+        output_path,
+        checkpoint_dir.display(),
+        leaf_count,
+        layer_index,
+        layer_sizes,
+        written_count + reused_count,
+        written_count,
+        reused_count,
+        root_table_count,
+        root_public_input_count,
+        compact_summary_fields
+    );
+    println!(
+        "read_ms={}, read_us={}, aggregate_ms={}, aggregate_us={}, root_verify_ms={}, root_verify_us={}, leaf_artifact_bytes={}, aggregate_artifact_bytes={}, root_artifact_bytes={}, max_base_public_inputs={}, max_recursive_public_inputs={}",
+        read_time.as_millis(),
+        read_time.as_micros(),
+        total_aggregate_time.as_millis(),
+        total_aggregate_time.as_micros(),
+        root_verify_time.as_millis(),
+        root_verify_time.as_micros(),
+        total_leaf_artifact_bytes,
+        total_aggregate_artifact_bytes,
+        root_artifact.len(),
+        max_base_public_inputs,
+        max_recursive_public_inputs
+    );
+
+    Ok(())
+}
+
+fn load_compact_recursive_pbs_chain_node(
+    node: &CompactRecursivePbsChainNodeArtifact,
+) -> Result<LoadedCompactRecursivePbsChainNode, Box<dyn Error>> {
+    let bytes = fs::read(node.path())?;
+    match node {
+        CompactRecursivePbsChainNodeArtifact::Leaf(_) => {
+            let proof = deserialize_compact_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+            Ok(LoadedCompactRecursivePbsChainNode::Leaf(Box::new(proof)))
+        }
+        CompactRecursivePbsChainNodeArtifact::Aggregate(_) => {
+            let proof =
+                deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(&bytes)?;
+            Ok(LoadedCompactRecursivePbsChainNode::Aggregate(Box::new(
+                proof,
+            )))
+        }
+    }
+}
+
 fn load_recursive_pbs_chain_node(
     node: &RecursivePbsChainNodeArtifact,
 ) -> Result<LoadedRecursivePbsChainNode, Box<dyn Error>> {
@@ -1745,6 +2230,29 @@ fn verify_pbs_chain_root_artifact_recursive_demo(path: &str) -> Result<(), Box<d
 
     println!(
         "pbs-chain root artifact verified: artifact={}, artifact_bytes={}, params_n={}, total_steps={}, chain_summary_fields={}, root_public_inputs={}, verify_ms={}, verify_us={}",
+        path,
+        bytes.len(),
+        summary.params.lwe_dimension,
+        summary.step_count,
+        summary.field_values().len(),
+        proof.root.public_input_count(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
+    );
+
+    Ok(())
+}
+
+fn verify_pbs_chain_compact_root_artifact_recursive_demo(path: &str) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    let proof = deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
+    let summary = proof.chain_summary.clone();
+    let verify_started = Instant::now();
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(&summary, &proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "pbs-chain compact root artifact verified: artifact={}, artifact_bytes={}, params_n={}, total_steps={}, compact_summary_fields={}, root_public_inputs={}, verify_ms={}, verify_us={}",
         path,
         bytes.len(),
         summary.params.lwe_dimension,
@@ -2223,7 +2731,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 

@@ -17,9 +17,9 @@ use tfheprus_core::{
 
 pub const SELECTOR_DIGEST_WIDTH: usize = 4;
 
-const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
-const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;
-const SELECTOR_DIGEST_MDS: [[u64; SELECTOR_DIGEST_WIDTH]; SELECTOR_DIGEST_WIDTH] =
+pub const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
+pub const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;
+pub const SELECTOR_DIGEST_MDS: [[u64; SELECTOR_DIGEST_WIDTH]; SELECTOR_DIGEST_WIDTH] =
     [[2, 3, 5, 7], [7, 2, 3, 5], [5, 7, 2, 3], [3, 5, 7, 2]];
 
 #[derive(Clone)]
@@ -1013,7 +1013,7 @@ fn selector_digest_from_values(
     digest_update_from_values(core::array::from_fn(selector_digest_initial_state), values)
 }
 
-fn digest_update_from_values(
+pub fn digest_update_from_values(
     mut state: [Goldilocks; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = Goldilocks>,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
@@ -1060,7 +1060,7 @@ fn selector_digest_mds_native(
     })
 }
 
-fn digest_initial_state(tag: u64) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
+pub fn digest_initial_state(tag: u64) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
     core::array::from_fn(|lane| selector_digest_const(tag, lane, 0, 0))
 }
 
@@ -1068,11 +1068,11 @@ fn selector_digest_initial_state(lane: usize) -> Goldilocks {
     selector_digest_const(0x5446_4845_7072_7573, lane, 0, 0)
 }
 
-fn selector_digest_absorb_coeff(index: usize, lane: usize) -> Goldilocks {
+pub fn selector_digest_absorb_coeff(index: usize, lane: usize) -> Goldilocks {
     selector_digest_const(0x0062_736b_5f6e_7474, index, lane, 0)
 }
 
-fn selector_digest_round_const(domain: usize, round: usize, lane: usize) -> Goldilocks {
+pub fn selector_digest_round_const(domain: usize, round: usize, lane: usize) -> Goldilocks {
     selector_digest_const(0x7062_735f_7374_6570, domain, round, lane)
 }
 
