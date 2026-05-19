@@ -18,12 +18,15 @@ use tfheprus_core::{
     Polynomial, SecretKey, TestPolynomial, GOLDILOCKS_MODULUS,
 };
 use tfheprus_prover::{
+    deserialize_aggregated_recursive_actual_pbs_chain_node_proof,
     deserialize_aggregated_recursive_actual_pbs_chain_root_proof,
     deserialize_recursive_actual_pbs_chain_chunk_proof, prove_actual_pbs,
     prove_actual_pbs_chain_chunk, prove_actual_pbs_step, prove_actual_pbs_step_chain,
     prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
-    prove_aggregated_recursive_actual_pbs_chain_chunk_tree, prove_mul_xai, prove_poly_mul,
+    prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
+    prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_mul_xai, prove_poly_mul,
     prove_recursive_actual_pbs_chain_chunk, prove_sample_extract,
+    serialize_aggregated_recursive_actual_pbs_chain_node_proof,
     serialize_aggregated_recursive_actual_pbs_chain_root_proof,
     serialize_recursive_actual_pbs_chain_chunk_proof, verify_actual_pbs_chain_chunk_proof,
     verify_actual_pbs_proof, verify_actual_pbs_step_chain_proof,
@@ -32,7 +35,9 @@ use tfheprus_prover::{
     verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof,
     verify_aggregated_recursive_actual_pbs_chain_root_summary_proof, verify_mul_xai_proof,
     verify_poly_mul_proof, verify_recursive_actual_pbs_chain_chunk_statement_proof,
-    verify_sample_extract_proof, ActualPbsChainChunkStatement,
+    verify_sample_extract_proof, ActualPbsChainChunkStatement, ActualPbsChainSummary,
+    AggregatedRecursiveActualPbsChainNodeProof, RecursiveActualPbsChainChunkProof,
+    RecursiveActualPbsChainNode,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1018,9 +1023,13 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
         .collect::<Vec<_>>();
     tfheprus_prover::validate_actual_pbs_chain_chunk_statements(&statements)
         .map_err(|error| format!("leaf artifact continuity check failed: {error}"))?;
-    for (index, (statement, leaf)) in statements.iter().zip(leaves.iter()).enumerate() {
-        verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, leaf)
-            .map_err(|error| format!("leaf artifact {index} verification failed: {error}"))?;
+    let leaf_count = leaves.len();
+    let full_wrapper_verify = leaf_count <= 8;
+    if full_wrapper_verify {
+        for (index, (statement, leaf)) in statements.iter().zip(leaves.iter()).enumerate() {
+            verify_recursive_actual_pbs_chain_chunk_statement_proof(statement, leaf)
+                .map_err(|error| format!("leaf artifact {index} verification failed: {error}"))?;
+        }
     }
     let max_base_public_inputs = leaves
         .iter()
@@ -1038,10 +1047,17 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
         .map_err(|error| format!("aggregate leaf artifacts: {error}"))?;
     let aggregate_time = aggregate_started.elapsed();
 
-    let verify_started = Instant::now();
-    verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(&statements, &proof)
+    let verify_time = if full_wrapper_verify {
+        let verify_started = Instant::now();
+        verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
+            &statements,
+            &proof,
+        )
         .map_err(|error| format!("verify aggregated leaf artifacts: {error}"))?;
-    let verify_time = verify_started.elapsed();
+        Some(verify_started.elapsed())
+    } else {
+        None
+    };
 
     let layer_sizes = proof
         .layers
@@ -1052,7 +1068,6 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
     let root_table_count = proof.root_table_count().unwrap_or(0);
     let root_public_input_count = proof.root_public_input_count().unwrap_or(0);
     let chain_summary_fields = proof.chain_summary.field_values().len();
-    let leaf_count = proof.leaf_count();
     let layer_count = proof.layer_count();
     let root_summary = proof.chain_summary.clone();
     let root_proof = proof.into_root_proof()?;
@@ -1083,8 +1098,8 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
         read_time.as_micros(),
         aggregate_time.as_millis(),
         aggregate_time.as_micros(),
-        verify_time.as_millis(),
-        verify_time.as_micros(),
+        optional_millis(verify_time),
+        optional_micros(verify_time),
         root_verify_time.as_millis(),
         root_verify_time.as_micros(),
         root_artifact.len(),
@@ -1101,7 +1116,281 @@ fn aggregate_pbs_chain_leaf_artifact_dir_recursive_demo(
     leaf_count: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
     let leaf_paths = leaf_artifact_paths_from_dir(leaf_dir, leaf_count)?;
-    aggregate_pbs_chain_leaf_artifacts_recursive_demo(output_path, leaf_paths)
+    let checkpoint_dir = Path::new(leaf_dir).join("aggregation");
+    aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
+        output_path,
+        leaf_paths,
+        &checkpoint_dir,
+    )
+}
+
+#[derive(Clone)]
+enum RecursivePbsChainNodeArtifact {
+    Leaf(PathBuf),
+    Aggregate(PathBuf),
+}
+
+enum LoadedRecursivePbsChainNode {
+    Leaf(RecursiveActualPbsChainChunkProof),
+    Aggregate(AggregatedRecursiveActualPbsChainNodeProof),
+}
+
+impl RecursivePbsChainNodeArtifact {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Leaf(path) | Self::Aggregate(path) => path,
+        }
+    }
+}
+
+impl LoadedRecursivePbsChainNode {
+    fn chain_summary(&self) -> &ActualPbsChainSummary {
+        match self {
+            Self::Leaf(proof) => &proof.chain_summary,
+            Self::Aggregate(proof) => &proof.chain_summary,
+        }
+    }
+
+    fn as_prover_node(&self) -> RecursiveActualPbsChainNode<'_> {
+        match self {
+            Self::Leaf(proof) => RecursiveActualPbsChainNode::Leaf(proof),
+            Self::Aggregate(proof) => RecursiveActualPbsChainNode::Aggregate(proof),
+        }
+    }
+}
+
+fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
+    output_path: &str,
+    leaf_paths: Vec<String>,
+    checkpoint_dir: &Path,
+) -> Result<(), Box<dyn Error>> {
+    if leaf_paths.len() < 2 {
+        return Err("at least two leaf artifacts are required".into());
+    }
+
+    fs::create_dir_all(checkpoint_dir)?;
+    let read_started = Instant::now();
+    let mut statements = Vec::with_capacity(leaf_paths.len());
+    let mut current_nodes = Vec::with_capacity(leaf_paths.len());
+    let mut current_summaries = Vec::with_capacity(leaf_paths.len());
+    let mut total_leaf_artifact_bytes = 0usize;
+    let mut max_base_public_inputs = 0usize;
+    let mut max_recursive_public_inputs = 0usize;
+    for path in leaf_paths {
+        let path = PathBuf::from(path);
+        let bytes = fs::read(&path)?;
+        total_leaf_artifact_bytes = total_leaf_artifact_bytes
+            .checked_add(bytes.len())
+            .ok_or("leaf artifact byte count overflow")?;
+        let leaf = deserialize_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+        max_base_public_inputs = max_base_public_inputs.max(leaf.base.public_inputs.len());
+        max_recursive_public_inputs =
+            max_recursive_public_inputs.max(leaf.recursion.public_input_count());
+        statements.push(leaf.base.public_statement());
+        current_summaries.push(leaf.chain_summary.clone());
+        current_nodes.push(RecursivePbsChainNodeArtifact::Leaf(path));
+    }
+    tfheprus_prover::validate_actual_pbs_chain_chunk_statements(&statements)
+        .map_err(|error| format!("leaf artifact continuity check failed: {error}"))?;
+    let read_time = read_started.elapsed();
+
+    let mut layer_sizes = Vec::new();
+    let mut written_count = 0usize;
+    let mut reused_count = 0usize;
+    let mut total_aggregate_time = Duration::ZERO;
+    let mut total_aggregate_artifact_bytes = 0usize;
+    let leaf_count = current_nodes.len();
+
+    let mut layer_index = 0usize;
+    while current_nodes.len() > 1 {
+        let pair_count = current_nodes.len() / 2;
+        let layer_dir = checkpoint_dir.join(format!("layer-{layer_index:03}"));
+        fs::create_dir_all(&layer_dir)?;
+        let mut next_nodes = Vec::with_capacity(current_nodes.len().div_ceil(2));
+        let mut next_summaries = Vec::with_capacity(current_summaries.len().div_ceil(2));
+        layer_sizes.push(pair_count);
+
+        for node_index in 0..pair_count {
+            let output_node_path = layer_dir.join(format!("agg-{node_index:05}.bin"));
+            let expected_summary = ActualPbsChainSummary::combine(
+                &current_summaries[node_index * 2],
+                &current_summaries[node_index * 2 + 1],
+            )?;
+
+            if output_node_path.exists() {
+                let bytes = fs::read(&output_node_path)?;
+                total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
+                    .checked_add(bytes.len())
+                    .ok_or("aggregate artifact byte count overflow")?;
+                let proof = deserialize_aggregated_recursive_actual_pbs_chain_node_proof(&bytes)?;
+                if proof.chain_summary != expected_summary {
+                    return Err(format!(
+                        "stale aggregate checkpoint has wrong summary: {}",
+                        output_node_path.display()
+                    )
+                    .into());
+                }
+                reused_count += 1;
+                eprintln!(
+                    "reused pbs-chain aggregate checkpoint: layer={}, node={}, artifact={}, bytes={}",
+                    layer_index,
+                    node_index,
+                    output_node_path.display(),
+                    bytes.len()
+                );
+            } else {
+                let left = load_recursive_pbs_chain_node(&current_nodes[node_index * 2])?;
+                let right = load_recursive_pbs_chain_node(&current_nodes[node_index * 2 + 1])?;
+                if left.chain_summary() != &current_summaries[node_index * 2]
+                    || right.chain_summary() != &current_summaries[node_index * 2 + 1]
+                {
+                    return Err("node summary changed while aggregating checkpoints".into());
+                }
+                let aggregate_started = Instant::now();
+                let proof = prove_aggregated_recursive_actual_pbs_chain_node_pair(
+                    left.as_prover_node(),
+                    right.as_prover_node(),
+                )?;
+                let aggregate_time = aggregate_started.elapsed();
+                total_aggregate_time += aggregate_time;
+                if proof.chain_summary != expected_summary {
+                    return Err("aggregate proof summary mismatch".into());
+                }
+                let bytes = serialize_aggregated_recursive_actual_pbs_chain_node_proof(&proof)?;
+                write_artifact_atomic(&output_node_path, &bytes)?;
+                total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
+                    .checked_add(bytes.len())
+                    .ok_or("aggregate artifact byte count overflow")?;
+                written_count += 1;
+                eprintln!(
+                    "wrote pbs-chain aggregate checkpoint: layer={}, node={}, artifact={}, bytes={}, aggregate_us={}",
+                    layer_index,
+                    node_index,
+                    output_node_path.display(),
+                    bytes.len(),
+                    aggregate_time.as_micros()
+                );
+            }
+
+            next_nodes.push(RecursivePbsChainNodeArtifact::Aggregate(output_node_path));
+            next_summaries.push(expected_summary);
+        }
+
+        if current_nodes.len() % 2 == 1 {
+            next_nodes.push(
+                current_nodes
+                    .last()
+                    .ok_or("missing carried aggregate node")?
+                    .clone(),
+            );
+            next_summaries.push(
+                current_summaries
+                    .last()
+                    .ok_or("missing carried aggregate summary")?
+                    .clone(),
+            );
+        }
+
+        current_nodes = next_nodes;
+        current_summaries = next_summaries;
+        layer_index += 1;
+    }
+
+    let final_node = current_nodes
+        .pop()
+        .ok_or("missing final aggregate checkpoint")?;
+    let root_summary = current_summaries
+        .pop()
+        .ok_or("missing final aggregate summary")?;
+    let RecursivePbsChainNodeArtifact::Aggregate(final_node_path) = final_node else {
+        return Err("final node must be an aggregate proof".into());
+    };
+    let final_node_bytes = fs::read(&final_node_path)?;
+    let final_node_proof =
+        deserialize_aggregated_recursive_actual_pbs_chain_node_proof(&final_node_bytes)?;
+    if final_node_proof.chain_summary != root_summary {
+        return Err("final aggregate summary mismatch".into());
+    }
+    let root_table_count = final_node_proof.table_count();
+    let root_public_input_count = final_node_proof.public_input_count();
+    let chain_summary_fields = final_node_proof.chain_summary.field_values().len();
+    let root_proof = final_node_proof.into_root_proof();
+    let root_artifact = serialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_proof)?;
+    let decoded_root_proof =
+        deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&root_artifact)?;
+    let root_verify_started = Instant::now();
+    verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root_summary,
+        &decoded_root_proof,
+    )?;
+    let root_verify_time = root_verify_started.elapsed();
+    write_artifact_atomic(Path::new(output_path), &root_artifact)?;
+
+    let layer_sizes = layer_sizes
+        .iter()
+        .map(|size| size.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "pbs-chain leaf artifacts checkpoint-aggregated: output={}, checkpoint_dir={}, leaves={}, layers={}, layer_sizes=[{}], aggregation_nodes={}, written={}, reused={}, root_tables={}, root_public_inputs={}, chain_summary_fields={}",
+        output_path,
+        checkpoint_dir.display(),
+        leaf_count,
+        layer_index,
+        layer_sizes,
+        written_count + reused_count,
+        written_count,
+        reused_count,
+        root_table_count,
+        root_public_input_count,
+        chain_summary_fields
+    );
+    println!(
+        "read_ms={}, read_us={}, aggregate_ms={}, aggregate_us={}, root_verify_ms={}, root_verify_us={}, leaf_artifact_bytes={}, aggregate_artifact_bytes={}, root_artifact_bytes={}, max_base_public_inputs={}, max_recursive_public_inputs={}",
+        read_time.as_millis(),
+        read_time.as_micros(),
+        total_aggregate_time.as_millis(),
+        total_aggregate_time.as_micros(),
+        root_verify_time.as_millis(),
+        root_verify_time.as_micros(),
+        total_leaf_artifact_bytes,
+        total_aggregate_artifact_bytes,
+        root_artifact.len(),
+        max_base_public_inputs,
+        max_recursive_public_inputs
+    );
+
+    Ok(())
+}
+
+fn load_recursive_pbs_chain_node(
+    node: &RecursivePbsChainNodeArtifact,
+) -> Result<LoadedRecursivePbsChainNode, Box<dyn Error>> {
+    let bytes = fs::read(node.path())?;
+    match node {
+        RecursivePbsChainNodeArtifact::Leaf(_) => {
+            let proof = deserialize_recursive_actual_pbs_chain_chunk_proof(&bytes)?;
+            Ok(LoadedRecursivePbsChainNode::Leaf(proof))
+        }
+        RecursivePbsChainNodeArtifact::Aggregate(_) => {
+            let proof = deserialize_aggregated_recursive_actual_pbs_chain_node_proof(&bytes)?;
+            Ok(LoadedRecursivePbsChainNode::Aggregate(proof))
+        }
+    }
+}
+
+fn write_artifact_atomic(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("artifact path must have a UTF-8 file name")?;
+    let temp_path = path.with_file_name(format!("{file_name}.tmp"));
+    fs::write(&temp_path, bytes)?;
+    fs::rename(temp_path, path)?;
+    Ok(())
 }
 
 fn verify_pbs_chain_root_artifact_recursive_demo(path: &str) -> Result<(), Box<dyn Error>> {

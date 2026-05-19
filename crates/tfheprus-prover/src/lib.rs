@@ -199,9 +199,20 @@ pub struct AggregatedRecursiveActualPbsChainChunkTreeProof {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct AggregatedRecursiveActualPbsChainNodeProof {
+    pub chain_summary: ActualPbsChainSummary,
+    pub aggregation: recursive::AggregatedRecursiveBatchProof,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct AggregatedRecursiveActualPbsChainRootProof {
     pub chain_summary: ActualPbsChainSummary,
     pub root: recursive::AggregatedRecursiveBatchProof,
+}
+
+pub enum RecursiveActualPbsChainNode<'a> {
+    Leaf(&'a RecursiveActualPbsChainChunkProof),
+    Aggregate(&'a AggregatedRecursiveActualPbsChainNodeProof),
 }
 
 impl AggregatedRecursiveActualPbsChainChunkTreeProof {
@@ -240,6 +251,39 @@ impl AggregatedRecursiveActualPbsChainChunkTreeProof {
             chain_summary: self.chain_summary,
             root: root_layer.remove(0),
         })
+    }
+}
+
+impl AggregatedRecursiveActualPbsChainNodeProof {
+    pub fn public_input_count(&self) -> usize {
+        self.aggregation.public_input_count()
+    }
+
+    pub fn table_count(&self) -> usize {
+        self.aggregation.table_count()
+    }
+
+    pub fn into_root_proof(self) -> AggregatedRecursiveActualPbsChainRootProof {
+        AggregatedRecursiveActualPbsChainRootProof {
+            chain_summary: self.chain_summary,
+            root: self.aggregation,
+        }
+    }
+}
+
+impl<'a> RecursiveActualPbsChainNode<'a> {
+    fn chain_summary(&self) -> &ActualPbsChainSummary {
+        match self {
+            Self::Leaf(proof) => &proof.chain_summary,
+            Self::Aggregate(proof) => &proof.chain_summary,
+        }
+    }
+
+    fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
+        match self {
+            Self::Leaf(proof) => proof.recursion.batch_proof(),
+            Self::Aggregate(proof) => proof.aggregation.batch_proof(),
+        }
     }
 }
 
@@ -676,6 +720,43 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_pair_statement_proof(
     )
 }
 
+pub fn prove_aggregated_recursive_actual_pbs_chain_node_pair(
+    left: RecursiveActualPbsChainNode<'_>,
+    right: RecursiveActualPbsChainNode<'_>,
+) -> Result<AggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let chain_summary =
+        ActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    let aggregation = recursive::prove_aggregate_batch_proofs_with_chain_summary(
+        left.batch_proof(),
+        right.batch_proof(),
+        &chain_summary.field_values(),
+        Some(&chain_summary_layout(&chain_summary.params)),
+    )?;
+
+    Ok(AggregatedRecursiveActualPbsChainNodeProof {
+        chain_summary,
+        aggregation,
+    })
+}
+
+pub fn verify_aggregated_recursive_actual_pbs_chain_node_pair_proof(
+    left: RecursiveActualPbsChainNode<'_>,
+    right: RecursiveActualPbsChainNode<'_>,
+    proof: &AggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<(), ProofError> {
+    let expected_summary =
+        ActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_summary_for_child_proofs(
+        left.batch_proof(),
+        right.batch_proof(),
+        &proof.chain_summary.field_values(),
+        &proof.aggregation,
+    )
+}
+
 pub fn validate_actual_pbs_chain_chunk_statements(
     statements: &[ActualPbsChainChunkStatement],
 ) -> Result<(), ProofError> {
@@ -875,6 +956,19 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
     )
 }
 
+pub fn verify_aggregated_recursive_actual_pbs_chain_node_summary_proof(
+    summary: &ActualPbsChainSummary,
+    proof: &AggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_public_summary(
+        &proof.aggregation,
+        &summary.field_values(),
+    )
+}
+
 pub fn serialize_aggregated_recursive_actual_pbs_chain_root_proof(
     proof: &AggregatedRecursiveActualPbsChainRootProof,
 ) -> Result<Vec<u8>, ProofError> {
@@ -887,6 +981,21 @@ pub fn deserialize_aggregated_recursive_actual_pbs_chain_root_proof(
     let mut proof: AggregatedRecursiveActualPbsChainRootProof = postcard::from_bytes(bytes)
         .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
     proof.root.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
+pub fn serialize_aggregated_recursive_actual_pbs_chain_node_proof(
+    proof: &AggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_aggregated_recursive_actual_pbs_chain_node_proof(
+    bytes: &[u8],
+) -> Result<AggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let mut proof: AggregatedRecursiveActualPbsChainNodeProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    proof.aggregation.rebuild_common_lookups()?;
     Ok(proof)
 }
 
