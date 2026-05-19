@@ -1,6 +1,7 @@
 //! Plonky3 circuit mirrors for `tfheprus-core`.
 
 pub mod range_check;
+pub mod sha3_circuit;
 
 use p3_circuit::circuit::Circuit;
 use p3_circuit::{CircuitBuilder, ExprId};
