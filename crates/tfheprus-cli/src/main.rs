@@ -33,6 +33,7 @@ use tfheprus_prover::{
     deserialize_aggregated_recursive_actual_pbs_chain_root_proof,
     deserialize_compact_aggregated_recursive_actual_pbs_chain_node_proof,
     deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof,
+    deserialize_compact_pbs_keyswitch_proof,
     deserialize_compact_recursive_actual_pbs_chain_chunk_proof,
     deserialize_recursive_actual_pbs_chain_chunk_proof,
     glwe_keyswitch_private_key_digest_proof_serialized_len, glwe_keyswitch_proof_serialized_len,
@@ -41,7 +42,8 @@ use tfheprus_prover::{
     prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_and_verify_keccak_f1600,
-    prove_glwe_keyswitch, prove_glwe_keyswitch_private_key_digest, prove_mul_xai, prove_poly_mul,
+    prove_compact_pbs_root_keyswitch_recursive, prove_glwe_keyswitch,
+    prove_glwe_keyswitch_private_key_digest, prove_mul_xai, prove_poly_mul,
     prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair,
@@ -52,6 +54,7 @@ use tfheprus_prover::{
     serialize_aggregated_recursive_actual_pbs_chain_root_proof,
     serialize_compact_aggregated_recursive_actual_pbs_chain_node_proof,
     serialize_compact_aggregated_recursive_actual_pbs_chain_root_proof,
+    serialize_compact_pbs_keyswitch_proof,
     serialize_compact_recursive_actual_pbs_chain_chunk_proof,
     serialize_recursive_actual_pbs_chain_chunk_proof, verify_actual_pbs_chain_chunk_proof,
     verify_actual_pbs_proof, verify_actual_pbs_step_chain_proof,
@@ -61,8 +64,8 @@ use tfheprus_prover::{
     verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof,
     verify_aggregated_recursive_actual_pbs_chain_root_summary_proof,
     verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof,
-    verify_glwe_keyswitch_private_key_digest_proof, verify_glwe_keyswitch_proof,
-    verify_mul_xai_proof, verify_poly_mul_proof,
+    verify_compact_pbs_keyswitch_proof, verify_glwe_keyswitch_private_key_digest_proof,
+    verify_glwe_keyswitch_proof, verify_mul_xai_proof, verify_poly_mul_proof,
     verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
@@ -90,6 +93,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("prove-compact-root-keyswitch") => prove_compact_root_keyswitch_demo(
             parse_required_arg(&args, 2, "compact root artifact")?,
         )?,
+        Some("prove-compact-root-keyswitch-recursive") => {
+            prove_compact_root_keyswitch_recursive_demo(
+                parse_required_arg(&args, 2, "compact root artifact")?,
+                parse_required_arg(&args, 3, "final recursive artifact")?,
+            )?
+        }
+        Some("verify-compact-root-keyswitch-recursive") => {
+            verify_compact_root_keyswitch_recursive_demo(parse_required_arg(
+                &args,
+                2,
+                "final recursive artifact",
+            )?)?
+        }
         Some("prove-keccak-f1600") => prove_keccak_f1600_demo()?,
         Some("prove-actual-pbs") => prove_actual_pbs_demo(parse_prove_preset_arg(&args)?)?,
         Some("prove-pbs-step") => prove_pbs_step_demo(parse_preset_arg(&args)?)?,
@@ -465,8 +481,13 @@ fn bench_glwe_keyswitch_modes_demo(preset: ParamPreset) -> Result<(), Box<dyn Er
 }
 
 fn glwe_keyswitch_demo_instance(preset: ParamPreset) -> (Params, SecretKey, GlweKeyswitchInstance) {
-    let (params, sk, evaluation_key, input, test_polynomial) =
-        actual_pbs_materials(preset.params());
+    glwe_keyswitch_instance_from_params(preset.params())
+}
+
+fn glwe_keyswitch_instance_from_params(
+    params: Params,
+) -> (Params, SecretKey, GlweKeyswitchInstance) {
+    let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
     let mut rng = ChaCha20Rng::seed_from_u64(301);
     let evaluation_key_ntt = evaluation_key.to_ntt();
     let accumulator = blind_rotate_ntt(&params, &evaluation_key_ntt, &input, &test_polynomial);
@@ -533,6 +554,97 @@ fn prove_compact_root_keyswitch_demo(root_artifact_path: &str) -> Result<(), Box
         verify_time.as_millis(),
         verify_time.as_micros(),
         instance.output.decrypt(&params, &sk.input_lwe)
+    );
+
+    Ok(())
+}
+
+fn prove_compact_root_keyswitch_recursive_demo(
+    root_artifact_path: &str,
+    final_artifact_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let root_bytes = fs::read(root_artifact_path)?;
+    let root_proof =
+        deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&root_bytes)?;
+    let root_summary = root_proof.chain_summary.clone();
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root_summary,
+        &root_proof,
+    )?;
+    if root_summary.step_count != root_summary.params.lwe_dimension {
+        return Err(format!(
+            "compact root covers {} steps, expected full PBS dimension {}",
+            root_summary.step_count, root_summary.params.lwe_dimension
+        )
+        .into());
+    }
+
+    let (params, sk, instance) = glwe_keyswitch_instance_from_params(root_summary.params.clone());
+    let key_switch_public_inputs = instance.public_inputs();
+    let accumulator_field_count = (params.glwe_dimension + 1) * params.polynomial_size;
+    let key_switch_accumulator_digest = compact_accumulator_digest_public_values(
+        &key_switch_public_inputs[..accumulator_field_count],
+    );
+    if key_switch_accumulator_digest != root_summary.output_accumulator_digest()? {
+        return Err(
+            "compact root output accumulator digest does not match key-switch input".into(),
+        );
+    }
+
+    let prove_started = Instant::now();
+    let final_proof = prove_compact_pbs_root_keyswitch_recursive(&root_proof, &instance)?;
+    let prove_time = prove_started.elapsed();
+    let verify_started = Instant::now();
+    verify_compact_pbs_keyswitch_proof(&final_proof)?;
+    let verify_time = verify_started.elapsed();
+    let final_bytes = serialize_compact_pbs_keyswitch_proof(&final_proof)?;
+    if let Some(parent) = Path::new(final_artifact_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(final_artifact_path, &final_bytes)?;
+    let decoded = deserialize_compact_pbs_keyswitch_proof(&final_bytes)?;
+    verify_compact_pbs_keyswitch_proof(&decoded)?;
+
+    println!(
+        "compact-root plus glwe-keyswitch recursive proof verified: root_artifact={}, root_artifact_bytes={}, final_artifact={}, final_artifact_bytes={}, params_n={}, total_steps={}, final_public_inputs={}, recursive_prove_ms={}, recursive_prove_us={}, recursive_verify_ms={}, recursive_verify_us={}, keyswitched_output_message={}",
+        root_artifact_path,
+        root_bytes.len(),
+        final_artifact_path,
+        final_bytes.len(),
+        params.lwe_dimension,
+        root_summary.step_count,
+        final_proof.public_input_count(),
+        prove_time.as_millis(),
+        prove_time.as_micros(),
+        verify_time.as_millis(),
+        verify_time.as_micros(),
+        instance.output.decrypt(&params, &sk.input_lwe)
+    );
+
+    Ok(())
+}
+
+fn verify_compact_root_keyswitch_recursive_demo(
+    final_artifact_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(final_artifact_path)?;
+    let proof = deserialize_compact_pbs_keyswitch_proof(&bytes)?;
+    let verify_started = Instant::now();
+    verify_compact_pbs_keyswitch_proof(&proof)?;
+    let verify_time = verify_started.elapsed();
+
+    println!(
+        "compact-root plus glwe-keyswitch recursive artifact verified: artifact={}, artifact_bytes={}, params_n={}, total_steps={}, final_public_inputs={}, output_lwe_fields={}, verify_ms={}, verify_us={}",
+        final_artifact_path,
+        bytes.len(),
+        proof.summary.pbs.params.lwe_dimension,
+        proof.summary.pbs.step_count,
+        proof.public_input_count(),
+        proof.summary.output_lwe.len(),
+        verify_time.as_millis(),
+        verify_time.as_micros()
     );
 
     Ok(())
@@ -3481,7 +3593,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1]|prove-compact-root-keyswitch <compact_root_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 

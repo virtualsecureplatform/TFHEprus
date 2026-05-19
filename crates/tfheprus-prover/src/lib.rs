@@ -5,7 +5,7 @@ mod poseidon_chain;
 mod range_check;
 mod recursive;
 
-use core::fmt;
+use core::{fmt, ops::Range};
 
 use p3_batch_stark::common::CommonData;
 use p3_batch_stark::ProverData;
@@ -94,6 +94,47 @@ pub struct GlweKeyswitchPrivateKeyDigestProof {
     pub params: Params,
     pub public_inputs: Vec<P3Goldilocks>,
     pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlweKeyswitchSummary {
+    pub params: Params,
+    pub public_inputs: Vec<P3Goldilocks>,
+}
+
+impl GlweKeyswitchSummary {
+    pub fn from_instance(instance: &GlweKeyswitchInstance) -> Self {
+        Self {
+            params: instance.params.clone(),
+            public_inputs: instance.public_inputs(),
+        }
+    }
+
+    pub fn field_values(&self) -> Vec<P3Goldilocks> {
+        let mut values = Vec::with_capacity(glwe_keyswitch_summary_field_count(&self.params));
+        values.extend(param_public_values(&self.params));
+        values.extend(self.public_inputs.iter().copied());
+        values
+    }
+
+    pub fn input_accumulator_digest(
+        &self,
+    ) -> Result<[P3Goldilocks; SELECTOR_DIGEST_WIDTH], ProofError> {
+        let layout = glwe_keyswitch_summary_layout(&self.params);
+        let fields = self.field_values();
+        Ok(compact_accumulator_digest(
+            &fields[layout.input_accumulator],
+        ))
+    }
+
+    pub fn output_lwe_values(&self) -> Result<Vec<P3Goldilocks>, ProofError> {
+        let layout = glwe_keyswitch_summary_layout(&self.params);
+        let fields = self.field_values();
+        if layout.output_lwe.end > fields.len() {
+            return Err(ProofError::StatementMismatch);
+        }
+        Ok(fields[layout.output_lwe].to_vec())
+    }
 }
 
 pub struct ActualPbsProof {
@@ -361,6 +402,52 @@ pub struct AggregatedRecursiveActualPbsChainRootProof {
 pub struct CompactAggregatedRecursiveActualPbsChainRootProof {
     pub chain_summary: CompactActualPbsChainSummary,
     pub root: recursive::AggregatedRecursiveBatchProof,
+}
+
+pub struct RecursiveGlweKeyswitchProof {
+    pub base: GlweKeyswitchProof,
+    pub recursion: recursive::RecursiveBatchProof,
+    pub summary: GlweKeyswitchSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactPbsKeyswitchSummary {
+    pub pbs: CompactActualPbsChainSummary,
+    pub output_lwe: Vec<P3Goldilocks>,
+}
+
+impl CompactPbsKeyswitchSummary {
+    pub fn new(
+        pbs: CompactActualPbsChainSummary,
+        output_lwe: Vec<P3Goldilocks>,
+    ) -> Result<Self, ProofError> {
+        if output_lwe.len() != pbs.params.lwe_dimension + 1 {
+            return Err(ProofError::StatementMismatch);
+        }
+        Ok(Self { pbs, output_lwe })
+    }
+
+    pub fn field_values(&self) -> Vec<P3Goldilocks> {
+        let mut values = self.pbs.field_values();
+        values.extend(self.output_lwe.iter().copied());
+        values
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CompactPbsKeyswitchProof {
+    pub summary: CompactPbsKeyswitchSummary,
+    pub aggregation: recursive::AggregatedRecursiveBatchProof,
+}
+
+impl CompactPbsKeyswitchProof {
+    pub fn public_input_count(&self) -> usize {
+        self.aggregation.public_input_count()
+    }
+
+    pub fn size_breakdown(&self) -> Result<RecursiveProofSizeBreakdown, ProofError> {
+        self.aggregation.size_breakdown()
+    }
 }
 
 pub enum RecursiveActualPbsChainNode<'a> {
@@ -667,6 +754,24 @@ pub fn prove_glwe_keyswitch(
     })
 }
 
+pub fn prove_recursive_glwe_keyswitch(
+    instance: &GlweKeyswitchInstance,
+) -> Result<RecursiveGlweKeyswitchProof, ProofError> {
+    let base = prove_glwe_keyswitch(instance)?;
+    let summary = GlweKeyswitchSummary::from_instance(instance);
+    let recursion = recursive::prove_private_recursive_batch_with_leaf_summary(
+        &base.proof,
+        &summary.field_values(),
+        glwe_keyswitch_summary_header_len(),
+    )?;
+
+    Ok(RecursiveGlweKeyswitchProof {
+        base,
+        recursion,
+        summary,
+    })
+}
+
 pub fn glwe_keyswitch_proof_serialized_len(
     proof: &GlweKeyswitchProof,
 ) -> Result<usize, ProofError> {
@@ -710,6 +815,21 @@ pub fn verify_glwe_keyswitch_proof(
     verify_circuit_proof(&proof.proof, &proof.public_inputs)
 }
 
+pub fn verify_recursive_glwe_keyswitch_proof(
+    instance: &GlweKeyswitchInstance,
+    proof: &RecursiveGlweKeyswitchProof,
+) -> Result<(), ProofError> {
+    verify_glwe_keyswitch_proof(instance, &proof.base)?;
+    let expected_summary = GlweKeyswitchSummary::from_instance(instance);
+    if proof.summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_recursive_batch_with_private_leaf_summary(
+        &proof.summary.field_values(),
+        &proof.recursion,
+    )
+}
+
 pub fn verify_glwe_keyswitch_private_key_digest_proof(
     instance: &GlweKeyswitchInstance,
     proof: &GlweKeyswitchPrivateKeyDigestProof,
@@ -726,6 +846,58 @@ pub fn verify_glwe_keyswitch_private_key_digest_proof(
 pub fn prove_and_verify_glwe_keyswitch(instance: &GlweKeyswitchInstance) -> Result<(), ProofError> {
     let proof = prove_glwe_keyswitch(instance)?;
     verify_glwe_keyswitch_proof(instance, &proof)
+}
+
+pub fn prove_compact_pbs_root_keyswitch_recursive(
+    root: &CompactAggregatedRecursiveActualPbsChainRootProof,
+    instance: &GlweKeyswitchInstance,
+) -> Result<CompactPbsKeyswitchProof, ProofError> {
+    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+        &root.chain_summary,
+        root,
+    )?;
+    if root.chain_summary.step_count != root.chain_summary.params.lwe_dimension
+        || root.chain_summary.params != instance.params
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    let key_switch = prove_recursive_glwe_keyswitch(instance)?;
+    let key_input_digest = key_switch.summary.input_accumulator_digest()?;
+    if key_input_digest != root.chain_summary.output_accumulator_digest()? {
+        return Err(ProofError::StatementMismatch);
+    }
+    let summary = CompactPbsKeyswitchSummary::new(
+        root.chain_summary.clone(),
+        key_switch.summary.output_lwe_values()?,
+    )?;
+    let aggregation = recursive::prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
+        root.root.batch_proof(),
+        key_switch.recursion.batch_proof(),
+        &root.chain_summary.field_values(),
+        &key_switch.summary.field_values(),
+        &summary.field_values(),
+        &compact_pbs_keyswitch_link_layout(&instance.params),
+    )?;
+
+    Ok(CompactPbsKeyswitchProof {
+        summary,
+        aggregation,
+    })
+}
+
+pub fn verify_compact_pbs_keyswitch_proof(
+    proof: &CompactPbsKeyswitchProof,
+) -> Result<(), ProofError> {
+    if proof.summary.pbs.step_count != proof.summary.pbs.params.lwe_dimension
+        || proof.summary.output_lwe.len() != proof.summary.pbs.params.lwe_dimension + 1
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_private_summary(
+        &proof.aggregation,
+        &proof.summary.field_values(),
+    )
 }
 
 pub fn prove_and_verify_glwe_keyswitch_private_key_digest(
@@ -1594,6 +1766,21 @@ pub fn deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(
     Ok(proof)
 }
 
+pub fn serialize_compact_pbs_keyswitch_proof(
+    proof: &CompactPbsKeyswitchProof,
+) -> Result<Vec<u8>, ProofError> {
+    postcard::to_allocvec(proof).map_err(|error| ProofError::Serialization(format!("{error:?}")))
+}
+
+pub fn deserialize_compact_pbs_keyswitch_proof(
+    bytes: &[u8],
+) -> Result<CompactPbsKeyswitchProof, ProofError> {
+    let mut proof: CompactPbsKeyswitchProof = postcard::from_bytes(bytes)
+        .map_err(|error| ProofError::Serialization(format!("{error:?}")))?;
+    proof.aggregation.rebuild_common_lookups()?;
+    Ok(proof)
+}
+
 pub fn serialize_aggregated_recursive_actual_pbs_chain_node_proof(
     proof: &AggregatedRecursiveActualPbsChainNodeProof,
 ) -> Result<Vec<u8>, ProofError> {
@@ -1708,6 +1895,28 @@ fn compact_chain_summary_public_field_count() -> usize {
     6 * SELECTOR_DIGEST_WIDTH
 }
 
+fn glwe_keyswitch_summary_field_count(params: &Params) -> usize {
+    glwe_keyswitch_summary_header_len() + glwe_keyswitch_public_field_count(params)
+}
+
+fn glwe_keyswitch_summary_header_len() -> usize {
+    param_public_value_count()
+}
+
+fn glwe_keyswitch_public_field_count(params: &Params) -> usize {
+    chain_glwe_field_count(params)
+        + glwe_keyswitch_key_ntt_field_count(params)
+        + params.lwe_dimension
+        + 1
+}
+
+fn glwe_keyswitch_key_ntt_field_count(params: &Params) -> usize {
+    params.glwe_dimension
+        * params.decomposition_level_count
+        * (params.glwe_dimension + 1)
+        * params.polynomial_size
+}
+
 fn chain_chunk_public_field_count(params: &Params) -> usize {
     2 * chain_glwe_field_count(params) + 4 * SELECTOR_DIGEST_WIDTH
 }
@@ -1773,6 +1982,41 @@ fn compact_chain_summary_layout() -> recursive::ChainSummaryLayout {
         mask_digest_out,
         output_accumulator: output_accumulator.clone(),
         len: output_accumulator.end,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GlweKeyswitchSummaryLayout {
+    input_accumulator: Range<usize>,
+    output_lwe: Range<usize>,
+}
+
+fn glwe_keyswitch_summary_layout(params: &Params) -> GlweKeyswitchSummaryLayout {
+    let header_len = glwe_keyswitch_summary_header_len();
+    let accumulator_len = chain_glwe_field_count(params);
+    let key_len = glwe_keyswitch_key_ntt_field_count(params);
+    let input_accumulator = header_len..header_len + accumulator_len;
+    let key_switch_key_ntt = input_accumulator.end..input_accumulator.end + key_len;
+    let output_lwe = key_switch_key_ntt.end..key_switch_key_ntt.end + params.lwe_dimension + 1;
+    GlweKeyswitchSummaryLayout {
+        input_accumulator,
+        output_lwe,
+    }
+}
+
+fn compact_pbs_keyswitch_link_layout(params: &Params) -> recursive::PbsKeyswitchLinkLayout {
+    let compact_layout = compact_chain_summary_layout();
+    let key_layout = glwe_keyswitch_summary_layout(params);
+    let compact_len = compact_layout.len;
+    let output_lwe_len = params.lwe_dimension + 1;
+    recursive::PbsKeyswitchLinkLayout {
+        compact_summary: compact_layout,
+        key_params: 0..param_public_value_count(),
+        key_input_accumulator: key_layout.input_accumulator,
+        key_output_lwe: key_layout.output_lwe,
+        final_compact_summary: 0..compact_len,
+        final_output_lwe: compact_len..compact_len + output_lwe_len,
+        final_len: compact_len + output_lwe_len,
     }
 }
 
@@ -2654,6 +2898,76 @@ mod tests {
             &aggregate,
         )
         .unwrap();
+    }
+
+    #[test]
+    #[ignore = "recursive proof smoke is expensive"]
+    fn compact_pbs_root_and_keyswitch_are_one_recursive_proof() {
+        let params = Params::new(2, 4, 1, 5, 4, 4);
+        let mut rng = ChaCha20Rng::seed_from_u64(305);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let ek = EvaluationKey::generate(&params, &sk, &mut rng);
+        let input_message = 1;
+        let output_message = 3;
+        let mask_step = GOLDILOCKS_MODULUS / params.exponent_modulus() as u64;
+        let mask = (0..params.lwe_dimension)
+            .map(|index| Goldilocks::from_u64(mask_step * ((index as u64 % 15) + 1)))
+            .collect();
+        let input = LweCiphertext::encrypt_with_mask(&params, &sk.input_lwe, input_message, mask);
+        let test_polynomial = TestPolynomial::single_slot(&params, input_message, output_message);
+        let body_exponent = mod_switch_to_exponent(&params, input.body);
+        let initial_exponent =
+            (params.exponent_modulus() - body_exponent) % params.exponent_modulus();
+        let input_accumulator = GlweCiphertext::trivial(
+            test_polynomial.poly.mul_xai(initial_exponent),
+            params.glwe_dimension,
+        );
+        let first = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[..1].to_vec(),
+            input_accumulator,
+            ek.bootstrapping_key[..1].to_vec(),
+            pbs_bsk_digest_initial(),
+            pbs_mask_digest_initial(),
+        );
+        let second = ActualPbsChainChunkInstance::new(
+            params.clone(),
+            input.mask[1..].to_vec(),
+            first.output_accumulator.clone(),
+            ek.bootstrapping_key[1..].to_vec(),
+            first.bsk_digest_out,
+            first.mask_digest_out,
+        );
+
+        let first_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&first).unwrap();
+        let second_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&second).unwrap();
+        let aggregate = prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair(
+            CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
+            CompactRecursiveActualPbsChainNode::Leaf(&second_leaf),
+        )
+        .unwrap();
+        let root = CompactAggregatedRecursiveActualPbsChainRootProof {
+            chain_summary: aggregate.chain_summary,
+            root: aggregate.aggregation,
+        };
+
+        let output_key = trivial_lwe_extraction_key(&params, &sk.input_lwe);
+        let key_switch_key = GlweKeySwitchKey::generate(&params, &sk.glwe, &output_key, &mut rng);
+        let key_switch =
+            GlweKeyswitchInstance::new(params.clone(), second.output_accumulator, key_switch_key);
+        let final_proof = prove_compact_pbs_root_keyswitch_recursive(&root, &key_switch).unwrap();
+
+        assert_eq!(
+            final_proof.summary.pbs.output_accumulator_digest().unwrap(),
+            compact_accumulator_digest(
+                &key_switch.public_inputs()[..chain_glwe_field_count(&params)]
+            )
+        );
+        assert_eq!(
+            final_proof.summary.output_lwe.len(),
+            params.lwe_dimension + 1
+        );
+        verify_compact_pbs_keyswitch_proof(&final_proof).unwrap();
     }
 
     #[test]

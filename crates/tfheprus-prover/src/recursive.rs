@@ -1,4 +1,5 @@
 use core::ops::Range;
+
 use p3_batch_stark::ProverData;
 use p3_circuit::ops::{
     generate_poseidon2_trace, generate_recompose_trace, GoldilocksD2Width8, Op, Poseidon2Config,
@@ -77,6 +78,17 @@ pub(crate) struct ChainSummaryLayout {
     pub mask_digest_out: Range<usize>,
     pub output_accumulator: Range<usize>,
     pub len: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PbsKeyswitchLinkLayout {
+    pub compact_summary: ChainSummaryLayout,
+    pub key_params: Range<usize>,
+    pub key_input_accumulator: Range<usize>,
+    pub key_output_lwe: Range<usize>,
+    pub final_compact_summary: Range<usize>,
+    pub final_output_lwe: Range<usize>,
+    pub final_len: usize,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -575,6 +587,107 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
     })
 }
 
+pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
+    root: &BatchStarkProof<GoldilocksConfig>,
+    key_switch: &BatchStarkProof<GoldilocksConfig>,
+    root_summary: &[F],
+    key_switch_summary: &[F],
+    final_summary: &[F],
+    layout: &PbsKeyswitchLinkLayout,
+) -> Result<AggregatedRecursiveBatchProof, ProofError> {
+    let config = goldilocks_config();
+    let table_packing = proof_table_packing();
+    let (verification_circuit, root_inputs, key_switch_inputs, root_mmcs_op_ids, key_mmcs_op_ids) =
+        build_private_aggregation_verifier_circuit_with_pbs_keyswitch_link(
+            root,
+            key_switch,
+            &config,
+            root_summary,
+            key_switch_summary,
+            final_summary,
+            layout,
+        )?;
+    let public_inputs = summary_public_inputs(final_summary);
+    let mut private_inputs = root_inputs.pack_private_verifier_values(
+        &table_public_inputs(root),
+        &root.proof,
+        &root.stark_common,
+    );
+    private_inputs.extend(key_switch_inputs.pack_private_verifier_values(
+        &table_public_inputs(key_switch),
+        &key_switch.proof,
+        &key_switch.stark_common,
+    ));
+    assert_public_ops_have_rows(&verification_circuit)?;
+
+    let mut runner = verification_circuit.runner();
+    runner.set_public_inputs(&public_inputs).map_err(|error| {
+        ProofError::Plonky3(format!(
+            "set private PBS/key-switch aggregate public summary inputs: {error:?}"
+        ))
+    })?;
+    runner
+        .set_private_inputs(&private_inputs)
+        .map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set private PBS/key-switch aggregate verifier inputs: {error:?}"
+            ))
+        })?;
+    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        &mut runner,
+        &root_mmcs_op_ids,
+        &root.proof.opening_proof,
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    )
+    .map_err(|error| {
+        ProofError::Plonky3(format!(
+            "set compact root private aggregate FRI private data: {error}"
+        ))
+    })?;
+    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        &mut runner,
+        &key_mmcs_op_ids,
+        &key_switch.proof.opening_proof,
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    )
+    .map_err(|error| {
+        ProofError::Plonky3(format!(
+            "set key-switch private aggregate FRI private data: {error}"
+        ))
+    })?;
+    let traces = runner.run().map_err(|error| {
+        ProofError::Plonky3(format!(
+            "run private PBS/key-switch aggregate verifier circuit: {error:?}"
+        ))
+    })?;
+
+    let preprocessors = recursive_verifier_preprocessors();
+    let air_builders = recursive_verifier_air_builders();
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
+            &verification_circuit,
+            &table_packing,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let circuit_prover_data =
+        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+
+    let prover = recursive_verifier_prover(config, table_packing);
+    let proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+    Ok(AggregatedRecursiveBatchProof {
+        public_inputs,
+        proof,
+    })
+}
+
 pub fn verify_aggregated_recursive_batch(
     proof: &AggregatedRecursiveBatchProof,
 ) -> Result<(), ProofError> {
@@ -719,6 +832,7 @@ fn build_private_verifier_circuit_with_leaf_summary(
         &base_table_provers,
         &fri_params,
     )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &verifier_inputs);
     let summary_targets = allocate_summary_public_inputs(&mut builder, summary.len());
     constrain_leaf_summary(
         &mut builder,
@@ -761,6 +875,7 @@ fn build_private_verifier_circuit_with_compact_leaf_summary(
         &base_table_provers,
         &fri_params,
     )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &verifier_inputs);
     let summary_targets = allocate_summary_public_inputs(&mut builder, summary.len());
     constrain_compact_leaf_summary(
         &mut builder,
@@ -893,6 +1008,7 @@ fn build_private_aggregation_verifier_circuit_with_chain_summary(
         &recursive_table_provers,
         &fri_params,
     )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &left_inputs);
     let (right_inputs, right_mmcs_op_ids) = add_private_batch_verifier_to_builder(
         &mut builder,
         right,
@@ -900,6 +1016,7 @@ fn build_private_aggregation_verifier_circuit_with_chain_summary(
         &recursive_table_provers,
         &fri_params,
     )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &right_inputs);
     let summary_targets = allocate_summary_public_inputs(&mut builder, summary.len());
     if let Some(layout) = layout {
         constrain_aggregate_summary(
@@ -922,6 +1039,61 @@ fn build_private_aggregation_verifier_circuit_with_chain_summary(
         right_inputs,
         left_mmcs_op_ids,
         right_mmcs_op_ids,
+    ))
+}
+
+fn build_private_aggregation_verifier_circuit_with_pbs_keyswitch_link(
+    root: &BatchStarkProof<GoldilocksConfig>,
+    key_switch: &BatchStarkProof<GoldilocksConfig>,
+    config: &GoldilocksConfig,
+    root_summary: &[F],
+    key_switch_summary: &[F],
+    final_summary: &[F],
+    layout: &PbsKeyswitchLinkLayout,
+) -> Result<AggregationVerifierCircuit, ProofError> {
+    let mut builder = CircuitBuilder::<Challenge>::new();
+    enable_recursive_verifier_ops(&mut builder);
+
+    let recursive_table_provers = recursive_batch_table_provers();
+    let fri_params = recursive_fri_verifier_params();
+    let (root_inputs, root_mmcs_op_ids) = add_private_batch_verifier_to_builder(
+        &mut builder,
+        root,
+        config,
+        &recursive_table_provers,
+        &fri_params,
+    )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &root_inputs);
+    let (key_switch_inputs, key_mmcs_op_ids) = add_private_batch_verifier_to_builder(
+        &mut builder,
+        key_switch,
+        config,
+        &recursive_table_provers,
+        &fri_params,
+    )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &key_switch_inputs);
+    let summary_targets = allocate_summary_public_inputs(&mut builder, final_summary.len());
+    constrain_pbs_keyswitch_link_summary(
+        &mut builder,
+        &root_inputs,
+        root,
+        root_summary,
+        &key_switch_inputs,
+        key_switch,
+        key_switch_summary,
+        &summary_targets,
+        layout,
+    )?;
+    let circuit = builder
+        .build()
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+    Ok((
+        circuit,
+        root_inputs,
+        key_switch_inputs,
+        root_mmcs_op_ids,
+        key_mmcs_op_ids,
     ))
 }
 
@@ -1063,6 +1235,74 @@ fn constrain_compact_leaf_summary(
     Ok(())
 }
 
+fn constrain_pbs_keyswitch_link_summary(
+    builder: &mut CircuitBuilder<Challenge>,
+    root_inputs: &VerifierInputs,
+    root: &BatchStarkProof<GoldilocksConfig>,
+    root_summary: &[F],
+    key_switch_inputs: &VerifierInputs,
+    key_switch: &BatchStarkProof<GoldilocksConfig>,
+    key_switch_summary: &[F],
+    summary_targets: &[ExprId],
+    layout: &PbsKeyswitchLinkLayout,
+) -> Result<(), ProofError> {
+    validate_pbs_keyswitch_link_layout(layout, root_summary.len(), key_switch_summary.len())?;
+    if summary_targets.len() != layout.final_len {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    let root_summary_targets =
+        child_summary_targets(builder, root_inputs, root, root_summary.len())?;
+    let key_switch_summary_targets = child_summary_targets(
+        builder,
+        key_switch_inputs,
+        key_switch,
+        key_switch_summary.len(),
+    )?;
+    touch_targets(builder, &key_switch_summary_targets);
+
+    connect_ranges(
+        builder,
+        summary_targets,
+        layout.final_compact_summary.clone(),
+        &root_summary_targets,
+        0..root_summary.len(),
+    )?;
+    connect_ranges(
+        builder,
+        &root_summary_targets,
+        layout.compact_summary.params.clone(),
+        &key_switch_summary_targets,
+        layout.key_params.clone(),
+    )?;
+
+    let key_input_digest = poseidon_chain::poseidon2_digest_targets_from_base_targets(
+        builder,
+        COMPACT_ACCUMULATOR_DIGEST_TAG,
+        key_switch_summary_targets[layout.key_input_accumulator.clone()]
+            .iter()
+            .copied(),
+    )
+    .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    connect_ranges(
+        builder,
+        &root_summary_targets,
+        layout.compact_summary.output_accumulator.clone(),
+        &key_input_digest,
+        0..SELECTOR_DIGEST_WIDTH,
+    )?;
+
+    connect_ranges(
+        builder,
+        summary_targets,
+        layout.final_output_lwe.clone(),
+        &key_switch_summary_targets,
+        layout.key_output_lwe.clone(),
+    )?;
+
+    Ok(())
+}
+
 fn constrain_aggregate_summary(
     builder: &mut CircuitBuilder<Challenge>,
     left_inputs: &VerifierInputs,
@@ -1158,6 +1398,33 @@ fn constrain_aggregate_summary(
         layout.output_accumulator.clone(),
     )?;
 
+    Ok(())
+}
+
+fn validate_pbs_keyswitch_link_layout(
+    layout: &PbsKeyswitchLinkLayout,
+    compact_summary_len: usize,
+    key_summary_len: usize,
+) -> Result<(), ProofError> {
+    validate_summary_layout(&layout.compact_summary)?;
+    if layout.compact_summary.len != compact_summary_len
+        || layout.final_compact_summary.len() != compact_summary_len
+        || layout.final_compact_summary.end > layout.final_len
+        || layout.final_output_lwe.end > layout.final_len
+        || layout.key_params.end > key_summary_len
+        || layout.key_input_accumulator.end > key_summary_len
+        || layout.key_output_lwe.end > key_summary_len
+        || layout.key_input_accumulator.start > layout.key_input_accumulator.end
+        || layout.key_output_lwe.start > layout.key_output_lwe.end
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+    if layout.compact_summary.output_accumulator.len() != SELECTOR_DIGEST_WIDTH {
+        return Err(ProofError::StatementMismatch);
+    }
+    if layout.final_output_lwe.len() != layout.key_output_lwe.len() {
+        return Err(ProofError::StatementMismatch);
+    }
     Ok(())
 }
 
@@ -1337,6 +1604,40 @@ fn summary_range_to_chunk_range(
 fn assert_equal(builder: &mut CircuitBuilder<Challenge>, left: ExprId, right: ExprId) {
     let diff = builder.sub(left, right);
     builder.assert_zero(diff);
+}
+
+fn touch_targets(builder: &mut CircuitBuilder<Challenge>, targets: &[ExprId]) {
+    let zero = builder.define_const(Challenge::ZERO);
+    for &target in targets {
+        let negated = builder.sub(zero, target);
+        let passthrough = builder.sub(zero, negated);
+        assert_equal(builder, passthrough, target);
+    }
+}
+
+fn touch_private_verifier_boundary_inputs(
+    builder: &mut CircuitBuilder<Challenge>,
+    verifier_inputs: &VerifierInputs,
+) {
+    for targets in &verifier_inputs.air_public_targets {
+        touch_targets(builder, targets);
+    }
+
+    let mut pow_targets = verifier_inputs
+        .proof_targets
+        .opening_proof
+        .commit_pow_witnesses
+        .iter()
+        .map(|witness| witness.witness)
+        .collect::<Vec<_>>();
+    pow_targets.push(
+        verifier_inputs
+            .proof_targets
+            .opening_proof
+            .pow_witness
+            .witness,
+    );
+    touch_targets(builder, &pow_targets);
 }
 
 fn add_batch_verifier_to_builder(

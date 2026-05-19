@@ -348,9 +348,22 @@ verifies the compact recursive root, checks the key-switch input accumulator
 against the root output-accumulator digest, proves and verifies the final GLWE
 key switch, and decrypts the final ciphertext under the original input LWE key
 with `key_switch_prove_us=676629`, `key_switch_verify_us=21616`, and
-`keyswitched_output_message=3`. Regenerate compact root artifacts after changes
-to the default encryption material, because the root digest binds the exact
-noisy ciphertext values.
+`keyswitched_output_message=3`.
+
+The one-artifact recursive PBS-plus-key-switch path is:
+`cargo run --release -p tfheprus-cli --
+prove-compact-root-keyswitch-recursive
+target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin
+target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root-keyswitch-final.bin`,
+followed by `cargo run --release -p tfheprus-cli --
+verify-compact-root-keyswitch-recursive
+target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root-keyswitch-final.bin`.
+This final recursive proof privately verifies the compact PBS root proof and the
+GLWE key-switch proof, links the key-switch input accumulator digest to the PBS
+root output digest in-circuit, and exposes only the compact PBS summary plus the
+final output LWE fields. Regenerate compact root artifacts after changes to the
+default encryption material, because the root digest binds the exact noisy
+ciphertext values.
 
 ## Validation
 
@@ -369,4 +382,6 @@ proves two recursive leaves plus one aggregate proof:
 ```bash
 cargo test --release -p tfheprus-prover \
   compact_recursive_private_pbs_public_inputs_remain_summary_only -- --ignored --nocapture
+cargo test -p tfheprus-prover \
+  compact_pbs_root_and_keyswitch_are_one_recursive_proof -- --ignored --nocapture
 ```
