@@ -20,8 +20,8 @@ use tfheprus_core::{
 pub const SELECTOR_DIGEST_WIDTH: usize = 4;
 pub const SHA3_DIGEST_WIDTH: usize = SHA3_256_DIGEST_FIELD_ELEMENTS;
 
-const SHA3_PBS_BSK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-bsk-chain";
-const SHA3_PBS_MASK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-mask-chain";
+pub const SHA3_PBS_BSK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-bsk-chain";
+pub const SHA3_PBS_MASK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-mask-chain";
 
 pub const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
 pub const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;

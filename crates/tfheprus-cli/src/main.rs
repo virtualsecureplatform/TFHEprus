@@ -11,10 +11,11 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tfheprus_circuits::{
     pbs_bsk_digest_initial, pbs_bsk_digest_update, pbs_mask_digest_initial, pbs_mask_digest_update,
-    sha3_circuit::sha3_256_field_elements_expr, ActualPbsChainChunkInstance,
-    ActualPbsCircuitProfile, ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
-    ActualPbsStepPrivateInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
-    SELECTOR_DIGEST_WIDTH,
+    sha3_circuit::{sha3_256_chain_update_fields_expr, sha3_256_field_elements_expr},
+    ActualPbsChainChunkInstance, ActualPbsCircuitProfile, ActualPbsInstance,
+    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
+    MulXaiInstance, PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
+    SHA3_DIGEST_WIDTH, SHA3_PBS_BSK_CHAIN_DOMAIN, SHA3_PBS_MASK_CHAIN_DOMAIN,
 };
 use tfheprus_core::{
     bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt, ggsw::cmux_ntt,
@@ -252,6 +253,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("profile-sha3-commit") => {
             profile_sha3_commit_demo(parse_sha3_field_count_arg(&args)?)?
         }
+        Some("profile-pbs-sha3-cost") => profile_pbs_sha3_cost_demo(parse_preset_arg(&args)?)?,
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
@@ -2753,7 +2755,197 @@ fn profile_sha3_commit_demo(field_count: usize) -> Result<(), Box<dyn Error>> {
 }
 
 fn sha3_padded_block_count(input_bytes: usize) -> usize {
-    (input_bytes + 1) / 136 + 1
+    input_bytes / 136 + 1
+}
+
+fn profile_pbs_sha3_cost_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    let glwe_polynomial_count = params.glwe_dimension + 1;
+    let selector_field_count = glwe_polynomial_count
+        .checked_mul(params.decomposition_level_count)
+        .and_then(|value| value.checked_mul(glwe_polynomial_count))
+        .and_then(|value| value.checked_mul(params.polynomial_size))
+        .ok_or("selector field count overflowed")?;
+    let accumulator_field_count = glwe_polynomial_count
+        .checked_mul(params.polynomial_size)
+        .ok_or("accumulator field count overflowed")?;
+
+    let bsk_update_bytes =
+        sha3_chain_update_absorbed_bytes(SHA3_PBS_BSK_CHAIN_DOMAIN, selector_field_count)?;
+    let mask_update_bytes = sha3_chain_update_absorbed_bytes(SHA3_PBS_MASK_CHAIN_DOMAIN, 1)?;
+    let accumulator_commit_bytes =
+        sha3_field_commit_absorbed_bytes(b"tfheprus-pbs-accumulator", accumulator_field_count)?;
+    let bsk_update_blocks = sha3_padded_block_count(bsk_update_bytes);
+    let mask_update_blocks = sha3_padded_block_count(mask_update_bytes);
+    let accumulator_commit_blocks = sha3_padded_block_count(accumulator_commit_bytes);
+    let full_bsk_chain_blocks = bsk_update_blocks
+        .checked_mul(params.lwe_dimension)
+        .ok_or("full BSK SHA3 block count overflowed")?;
+    let full_mask_chain_blocks = mask_update_blocks
+        .checked_mul(params.lwe_dimension)
+        .ok_or("full mask SHA3 block count overflowed")?;
+
+    let op_model = Sha3ChainOpModel::measure(SHA3_PBS_BSK_CHAIN_DOMAIN)?;
+    let estimated_bsk_update_ops = op_model.estimate(selector_field_count, bsk_update_blocks);
+    let estimated_mask_update_ops = op_model.estimate(1, mask_update_blocks);
+    let estimated_full_bsk_chain_ops = estimated_bsk_update_ops
+        .checked_mul(params.lwe_dimension as u128)
+        .ok_or("full BSK SHA3 op estimate overflowed")?;
+    let estimated_full_mask_chain_ops = estimated_mask_update_ops
+        .checked_mul(params.lwe_dimension as u128)
+        .ok_or("full mask SHA3 op estimate overflowed")?;
+
+    print_param_line(preset.name(), &params);
+    println!(
+        "pbs-sha3-cost profile: selector_fields={}, accumulator_fields={}, steps={}",
+        selector_field_count, accumulator_field_count, params.lwe_dimension
+    );
+    println!(
+        "sha3 absorbed bytes: bsk_update={}, mask_update={}, accumulator_commit={}",
+        bsk_update_bytes, mask_update_bytes, accumulator_commit_bytes
+    );
+    println!(
+        "sha3 rate blocks: bsk_update={}, mask_update={}, accumulator_commit={}, full_bsk_chain={}, full_mask_chain={}",
+        bsk_update_blocks,
+        mask_update_blocks,
+        accumulator_commit_blocks,
+        full_bsk_chain_blocks,
+        full_mask_chain_blocks
+    );
+    println!(
+        "generic-sha3 circuit op model: one_value_one_block_ops={}, per_extra_value_ops={}, per_extra_block_ops={}",
+        op_model.one_value_one_block_ops,
+        op_model.per_extra_value_ops,
+        op_model.per_extra_block_ops
+    );
+    println!(
+        "generic-sha3 estimated ops: bsk_update={} ({:.2}B), mask_update={}, full_bsk_chain={} ({:.2}B), full_mask_chain={}",
+        estimated_bsk_update_ops,
+        ops_to_billions(estimated_bsk_update_ops),
+        estimated_mask_update_ops,
+        estimated_full_bsk_chain_ops,
+        ops_to_billions(estimated_full_bsk_chain_ops),
+        estimated_full_mask_chain_ops
+    );
+    println!(
+        "sha3 conclusion: native SHA3 commitments are fine, but in-circuit PBS SHA3 needs a dedicated Keccak AIR/NPO; the generic arithmetic gadget is only for small binding checks."
+    );
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Sha3ChainOpModel {
+    one_value_one_block_ops: usize,
+    per_extra_value_ops: usize,
+    per_extra_block_ops: usize,
+}
+
+impl Sha3ChainOpModel {
+    fn measure(domain: &[u8]) -> Result<Self, Box<dyn Error>> {
+        let one_value_count = first_sha3_chain_value_count_with_blocks(domain, 1)?;
+        let two_values_one_block_count =
+            next_sha3_chain_value_count_with_blocks(domain, one_value_count, 1)?;
+        let two_block_value_count = first_sha3_chain_value_count_with_blocks(domain, 2)?;
+
+        let one_value_one_block_ops = sha3_chain_update_circuit_op_count(domain, one_value_count)?;
+        let two_values_one_block_ops =
+            sha3_chain_update_circuit_op_count(domain, two_values_one_block_count)?;
+        let two_block_ops = sha3_chain_update_circuit_op_count(domain, two_block_value_count)?;
+
+        let value_delta = two_values_one_block_count
+            .checked_sub(one_value_count)
+            .ok_or("invalid SHA3 value count model")?;
+        let per_extra_value_ops = two_values_one_block_ops
+            .checked_sub(one_value_one_block_ops)
+            .ok_or("SHA3 per-value op model underflowed")?
+            / value_delta;
+        let two_block_expected_without_extra_block = one_value_one_block_ops
+            .checked_add(per_extra_value_ops * (two_block_value_count - one_value_count))
+            .ok_or("SHA3 op model overflowed")?;
+        let per_extra_block_ops = two_block_ops
+            .checked_sub(two_block_expected_without_extra_block)
+            .ok_or("SHA3 per-block op model underflowed")?;
+
+        Ok(Self {
+            one_value_one_block_ops,
+            per_extra_value_ops,
+            per_extra_block_ops,
+        })
+    }
+
+    fn estimate(&self, value_count: usize, block_count: usize) -> u128 {
+        self.one_value_one_block_ops as u128
+            + self.per_extra_value_ops as u128 * value_count.saturating_sub(1) as u128
+            + self.per_extra_block_ops as u128 * block_count.saturating_sub(1) as u128
+    }
+}
+
+fn first_sha3_chain_value_count_with_blocks(
+    domain: &[u8],
+    block_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    next_sha3_chain_value_count_with_blocks(domain, 0, block_count)
+}
+
+fn next_sha3_chain_value_count_with_blocks(
+    domain: &[u8],
+    after: usize,
+    block_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    for value_count in after + 1..=1024 {
+        if sha3_padded_block_count(sha3_chain_update_absorbed_bytes(domain, value_count)?)
+            == block_count
+        {
+            return Ok(value_count);
+        }
+    }
+    Err(format!("could not find SHA3 chain input with {block_count} blocks").into())
+}
+
+fn sha3_chain_update_circuit_op_count(
+    domain: &[u8],
+    value_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let previous = builder.alloc_public_input_array::<SHA3_DIGEST_WIDTH>("sha3_previous_word");
+    let values = builder.alloc_public_inputs(value_count, "sha3_chain_value");
+    let digest = sha3_256_chain_update_fields_expr(&mut builder, domain, &previous, &values)?;
+    let expected = builder.alloc_public_inputs(SHA3_DIGEST_WIDTH, "sha3_expected_word");
+    for (&computed, &expected) in digest.iter().zip(&expected) {
+        builder.connect(computed, expected);
+    }
+    Ok(builder.build()?.ops.len())
+}
+
+fn sha3_field_commit_absorbed_bytes(
+    domain: &[u8],
+    field_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    SHA3_256_DOMAIN_PREFIX
+        .len()
+        .checked_add(4)
+        .and_then(|value| value.checked_add(domain.len()))
+        .and_then(|value| value.checked_add(field_count.checked_mul(8)?))
+        .ok_or_else(|| "SHA3 field commitment byte count overflowed".into())
+}
+
+fn sha3_chain_update_absorbed_bytes(
+    domain: &[u8],
+    value_count: usize,
+) -> Result<usize, Box<dyn Error>> {
+    SHA3_256_DOMAIN_PREFIX
+        .len()
+        .checked_add(4)
+        .and_then(|value| value.checked_add(domain.len()))
+        .and_then(|value| value.checked_add(b"chain-update".len()))
+        .and_then(|value| value.checked_add(SHA3_DIGEST_WIDTH.checked_mul(4)?))
+        .and_then(|value| value.checked_add(value_count.checked_mul(8)?))
+        .ok_or_else(|| "SHA3 chain-update byte count overflowed".into())
+}
+
+fn ops_to_billions(ops: u128) -> f64 {
+    ops as f64 / 1_000_000_000.0
 }
 
 fn aggregation_layer_sizes(mut node_count: usize) -> Vec<usize> {
@@ -3026,7 +3218,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -3214,4 +3406,19 @@ fn print_param_line(name: &str, params: &Params) {
         params.decomposition_level_count,
         params.plaintext_modulus
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha3_padded_block_count_matches_rate_boundaries() {
+        assert_eq!(sha3_padded_block_count(0), 1);
+        assert_eq!(sha3_padded_block_count(134), 1);
+        assert_eq!(sha3_padded_block_count(135), 1);
+        assert_eq!(sha3_padded_block_count(136), 2);
+        assert_eq!(sha3_padded_block_count(271), 2);
+        assert_eq!(sha3_padded_block_count(272), 3);
+    }
 }
