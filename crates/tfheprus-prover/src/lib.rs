@@ -1,5 +1,6 @@
 //! Plonky3-backed prove/verify proof-of-concept entry points.
 
+mod keccak;
 mod range_check;
 mod recursive;
 
@@ -39,6 +40,11 @@ use tfheprus_circuits::{
     SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::{Goldilocks, Params};
+
+pub use keccak::{
+    prove_and_verify_keccak_f1600, prove_keccak_f1600, verify_keccak_f1600, KeccakF1600Proof,
+    KeccakF1600Statement,
+};
 
 const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
 pub(crate) const BASE_PROOF_FRI_LOG_BLOWUP: usize = 1;

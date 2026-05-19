@@ -516,6 +516,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "p3-keccak-air"
+version = "0.5.1"
+source = "git+https://github.com/Plonky3/Plonky3?rev=56952503e1401a62982ceaf952c5e4a829b61803#56952503e1401a62982ceaf952c5e4a829b61803"
+dependencies = [
+ "p3-air",
+ "p3-field",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-util",
+ "rand 0.10.1",
+ "tracing",
+]
+
+[[package]]
 name = "p3-koala-bear"
 version = "0.5.1"
 source = "git+https://github.com/Plonky3/Plonky3?rev=56952503e1401a62982ceaf952c5e4a829b61803#56952503e1401a62982ceaf952c5e4a829b61803"
@@ -1101,6 +1115,7 @@ dependencies = [
  "p3-field",
  "p3-fri",
  "p3-goldilocks",
+ "p3-keccak-air",
  "p3-lookup",
  "p3-matrix",
  "p3-merkle-tree",

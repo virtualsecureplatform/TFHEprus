@@ -18,6 +18,7 @@ p3-dft.workspace = true
 p3-field.workspace = true
 p3-fri.workspace = true
 p3-goldilocks.workspace = true
+p3-keccak-air.workspace = true
 p3-lookup.workspace = true
 p3-matrix.workspace = true
 p3-merkle-tree.workspace = true
