@@ -331,20 +331,20 @@ The run reported `total_prove_us=2621614911`, `aggregate_us=156483219`,
 `aggregate_artifact_bytes=16124512`, and `root_artifact_bytes=179105`.
 The leaf-cost profiler is available for the next optimization pass:
 `profile-pbs-chain-leaf-cost paper-v1 8 shape` reports an 8-step leaf with
-`total_ops=4333716`, `witness_count=4413604`, `private_inputs=229896`,
-`alu_rows=4212784`, `digit_ntts=64`, `inverse_ntts=128`,
+`total_ops=2760852`, `witness_count=2840740`, `private_inputs=229896`,
+`alu_rows=2639920`, `digit_ntts=64`, `inverse_ntts=32`,
 `digit_range_checks=65536`, and `error_range_checks=16384`.
 `profile-pbs-chain-leaf-cost paper-v1 8 prove` verified the base 8-step leaf
-with `build_us=1620799`, `air_prep_us=789986`, `prover_data_us=5271495`,
-`witness_run_us=293074`, `prove_us=13634420`, and `verify_us=26709`. Since
+with `build_us=947097`, `air_prep_us=528048`, `prover_data_us=2733711`,
+`witness_run_us=209248`, `prove_us=7260047`, and `verify_us=25146`. Since
 paper-v1 uses 91 same-shaped leaves, the compact recursive leaf batch path now
 caches both the base leaf prover data and the private compact recursive-wrapper
 prover data for newly written leaves.
 A two-leaf cached paper-v1 smoke run
 `prove-pbs-chain-private-leaves-compact-fast paper-v1 8 2` reported
-`prove_us=29198255` for the first leaf, including one-time prover setup, and
-`prove_us=18917361` for the second steady-state leaf. Extrapolated over 91
-same-shaped leaves this is roughly 1732 seconds before aggregation, compared
+`prove_us=18567713` for the first leaf, including one-time prover setup, and
+`prove_us=12819439` for the second steady-state leaf. Extrapolated over 91
+same-shaped leaves this is roughly 1172 seconds before aggregation, compared
 with the previously recorded 2621-second leaf total.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression

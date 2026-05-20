@@ -2486,11 +2486,11 @@ fn actual_pbs_leaf_logical_profile(
     let error_range_checks = usize::from(approximate_decomposition) * decomposition_coefficients;
     let error_sign_bool_checks = error_range_checks;
     let digit_ntts = decomposition_polys * levels;
-    let inverse_ntts = digit_ntts * glwe_polys;
+    let inverse_ntts = decomposition_polys * glwe_polys;
     let log_n = polynomial_size.trailing_zeros() as usize;
     let butterflies_per_ntt = (polynomial_size / 2) * log_n;
     let ntt_butterflies = (digit_ntts + inverse_ntts) * butterflies_per_ntt;
-    let pointwise_ntt_muls = inverse_ntts * polynomial_size;
+    let pointwise_ntt_muls = digit_ntts * glwe_polys * polynomial_size;
     let exponent_bits = params.exponent_modulus().trailing_zeros() as usize;
     let rotation_selects = step_count * glwe_polys * polynomial_size * exponent_bits;
     let ggsw_ntt_private_inputs = step_count * glwe_polys * levels * glwe_polys * polynomial_size;

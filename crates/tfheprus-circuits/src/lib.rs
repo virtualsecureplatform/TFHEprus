@@ -1836,13 +1836,37 @@ fn glev_external_product_by_plain_poly_expr(
     poly: &[ExprId],
 ) -> GlweExpr {
     let digits = decompose_poly_expr(builder, params, poly);
-    let mut acc = zero_glwe_expr(builder, params);
+    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let mut mask_acc = vec![vec![zero; params.polynomial_size]; params.glwe_dimension];
+    let mut body_acc = vec![zero; params.polynomial_size];
     for (digit_poly, level_ct) in digits.iter().zip(ct.levels.iter()) {
         let digit_ntt = negacyclic_ntt_expr(builder, digit_poly);
-        let product = glwe_mul_by_plain_poly_ntt_expr(builder, level_ct, &digit_ntt);
-        acc = glwe_add_expr(builder, &acc, &product);
+        for (acc_poly, level_poly) in mask_acc.iter_mut().zip(level_ct.mask.iter()) {
+            accumulate_ntt_product_expr(builder, acc_poly, &digit_ntt, level_poly);
+        }
+        accumulate_ntt_product_expr(builder, &mut body_acc, &digit_ntt, &level_ct.body);
     }
-    acc
+    GlweExpr {
+        mask: mask_acc
+            .into_iter()
+            .map(|mut poly| negacyclic_intt_expr(builder, &mut poly))
+            .collect(),
+        body: negacyclic_intt_expr(builder, &mut body_acc),
+    }
+}
+
+fn accumulate_ntt_product_expr(
+    builder: &mut CircuitBuilder<P3Goldilocks>,
+    acc: &mut [ExprId],
+    lhs_eval: &[ExprId],
+    rhs_eval: &[ExprId],
+) {
+    assert_eq!(acc.len(), lhs_eval.len());
+    assert_eq!(lhs_eval.len(), rhs_eval.len());
+    for ((acc, &lhs), &rhs) in acc.iter_mut().zip(lhs_eval.iter()).zip(rhs_eval.iter()) {
+        let term = builder.mul(lhs, rhs);
+        *acc = builder.add(*acc, term);
+    }
 }
 
 fn decompose_poly_expr(
@@ -1986,21 +2010,6 @@ fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -
     GlweExpr {
         mask: vec![vec![zero; params.polynomial_size]; params.glwe_dimension],
         body: vec![zero; params.polynomial_size],
-    }
-}
-
-fn glwe_mul_by_plain_poly_ntt_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    ct: &GlweNttExpr,
-    poly_ntt: &[ExprId],
-) -> GlweExpr {
-    GlweExpr {
-        mask: ct
-            .mask
-            .iter()
-            .map(|mask_poly| poly_mul_ntt_evals_expr(builder, poly_ntt, mask_poly))
-            .collect(),
-        body: poly_mul_ntt_evals_expr(builder, poly_ntt, &ct.body),
     }
 }
 
