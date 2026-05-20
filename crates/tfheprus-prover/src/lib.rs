@@ -1592,6 +1592,30 @@ pub fn prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair(
     })
 }
 
+pub fn prove_private_compact_appended_recursive_actual_pbs_chain_node(
+    previous: CompactRecursiveActualPbsChainNode<'_>,
+    chunk: &ActualPbsChainChunkProof,
+) -> Result<CompactAggregatedRecursiveActualPbsChainNodeProof, ProofError> {
+    let chunk_summary =
+        CompactActualPbsChainSummary::from_chunk_statement(&chunk.public_statement())?;
+    let chain_summary =
+        CompactActualPbsChainSummary::combine(previous.chain_summary(), &chunk_summary)?;
+    let aggregation = recursive::prove_private_append_batch_proof_with_compact_chunk_summary(
+        previous.batch_proof(),
+        &chunk.proof,
+        &chain_summary.field_values(),
+        &chunk_summary.field_values(),
+        chain_summary_header_len(),
+        &chain_summary_layout(&chain_summary.params),
+        &compact_chain_summary_layout(),
+    )?;
+
+    Ok(CompactAggregatedRecursiveActualPbsChainNodeProof {
+        chain_summary,
+        aggregation,
+    })
+}
+
 pub fn verify_aggregated_recursive_actual_pbs_chain_node_pair_proof(
     left: RecursiveActualPbsChainNode<'_>,
     right: RecursiveActualPbsChainNode<'_>,
@@ -1617,6 +1641,23 @@ pub fn verify_private_compact_aggregated_recursive_actual_pbs_chain_node_pair_pr
 ) -> Result<(), ProofError> {
     let expected_summary =
         CompactActualPbsChainSummary::combine(left.chain_summary(), right.chain_summary())?;
+    if proof.chain_summary != expected_summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    recursive::verify_aggregated_recursive_batch_with_private_summary(
+        &proof.aggregation,
+        &proof.chain_summary.field_values(),
+    )
+}
+
+pub fn verify_private_compact_appended_recursive_actual_pbs_chain_node_proof(
+    previous: CompactRecursiveActualPbsChainNode<'_>,
+    chunk_statement: &ActualPbsChainChunkStatement,
+    proof: &CompactAggregatedRecursiveActualPbsChainNodeProof,
+) -> Result<(), ProofError> {
+    let chunk_summary = CompactActualPbsChainSummary::from_chunk_statement(chunk_statement)?;
+    let expected_summary =
+        CompactActualPbsChainSummary::combine(previous.chain_summary(), &chunk_summary)?;
     if proof.chain_summary != expected_summary {
         return Err(ProofError::StatementMismatch);
     }
@@ -3335,6 +3376,24 @@ mod tests {
             CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
             CompactRecursiveActualPbsChainNode::Leaf(&second_leaf),
             &aggregate,
+        )
+        .unwrap();
+
+        let second_base = prove_actual_pbs_chain_chunk(&second).unwrap();
+        let appended = prove_private_compact_appended_recursive_actual_pbs_chain_node(
+            CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
+            &second_base,
+        )
+        .unwrap();
+        assert_eq!(appended.chain_summary, expected_summary);
+        assert_eq!(
+            appended.public_input_count(),
+            compact_chain_summary_field_count()
+        );
+        verify_private_compact_appended_recursive_actual_pbs_chain_node_proof(
+            CompactRecursiveActualPbsChainNode::Leaf(&first_leaf),
+            &second_statement,
+            &appended,
         )
         .unwrap();
     }

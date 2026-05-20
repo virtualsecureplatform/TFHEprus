@@ -124,6 +124,7 @@ cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaf-dir-recursive ta
 cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin
 cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 shape
 cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 prove
+cargo run --release -p tfheprus-cli -- profile-pbs-chain-compact-append paper-v1 8
 cargo run -p tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
@@ -353,6 +354,16 @@ two-leaf `paper-v1 16 2` smoke run reported `prove_us=30410937` for the first
 leaf and `prove_us=19847131` for the second steady-state leaf. The full c16
 run above keeps the steady full-leaf cost near 20 seconds and the partial tail
 at `prove_us=18582700`.
+The linear compact-append recursion experiment is implemented and profiled via
+`profile-pbs-chain-compact-append`. It proves that a previous compact chain
+proof plus the next base PBS chunk can be folded directly to the next compact
+summary, but it is not a speed win in the current Plonky3 shape: for
+`paper-v1 8`, `second_base_prove_us=11501870` plus
+`append_prove_us=7435635`, while the existing cached second leaf plus binary
+aggregate path reported `second_leaf_prove_us=12413066` and
+`aggregate_prove_us=1738473`. The summaries matched and both variants exposed
+31 public inputs, so this is a correctness/data point rather than the next
+performance path.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.

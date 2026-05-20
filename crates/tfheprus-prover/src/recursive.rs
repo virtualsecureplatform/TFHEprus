@@ -488,6 +488,140 @@ impl PrivateCompactLeafRecursionProver {
     }
 }
 
+pub(crate) struct PrivateCompactAppendRecursionProver {
+    verification_circuit: Circuit<Challenge>,
+    previous_inputs: VerifierInputs,
+    chunk_inputs: VerifierInputs,
+    previous_mmcs_op_ids: Vec<p3_circuit::NonPrimitiveOpId>,
+    chunk_mmcs_op_ids: Vec<p3_circuit::NonPrimitiveOpId>,
+    table_packing: TablePacking,
+    circuit_prover_data: CircuitProverData<GoldilocksConfig>,
+}
+
+impl PrivateCompactAppendRecursionProver {
+    pub(crate) fn new(
+        previous: &BatchStarkProof<GoldilocksConfig>,
+        chunk: &BatchStarkProof<GoldilocksConfig>,
+        chunk_summary: &[F],
+        chunk_public_offset: usize,
+        full_layout: &ChainSummaryLayout,
+        compact_layout: &ChainSummaryLayout,
+    ) -> Result<Self, ProofError> {
+        let config = goldilocks_config();
+        let table_packing = proof_table_packing();
+        let (
+            verification_circuit,
+            previous_inputs,
+            chunk_inputs,
+            previous_mmcs_op_ids,
+            chunk_mmcs_op_ids,
+        ) = build_private_append_verifier_circuit_with_compact_chunk_summary(
+            previous,
+            chunk,
+            chunk_summary,
+            chunk_public_offset,
+            full_layout,
+            compact_layout,
+        )?;
+        let preprocessors = recursive_verifier_preprocessors();
+        let air_builders = recursive_verifier_air_builders();
+        let (airs_degrees, primitive_columns, non_primitive_columns) =
+            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
+                &verification_circuit,
+                &table_packing,
+                &preprocessors,
+                &air_builders,
+                ConstraintProfile::Standard,
+            )
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+        let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+        let circuit_prover_data =
+            CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+
+        Ok(Self {
+            verification_circuit,
+            previous_inputs,
+            chunk_inputs,
+            previous_mmcs_op_ids,
+            chunk_mmcs_op_ids,
+            table_packing,
+            circuit_prover_data,
+        })
+    }
+
+    pub(crate) fn prove(
+        &self,
+        previous: &BatchStarkProof<GoldilocksConfig>,
+        chunk: &BatchStarkProof<GoldilocksConfig>,
+        summary: &[F],
+    ) -> Result<AggregatedRecursiveBatchProof, ProofError> {
+        let public_inputs = summary_public_inputs(summary);
+        let mut private_inputs = self.previous_inputs.pack_private_verifier_values(
+            &table_public_inputs(previous),
+            &previous.proof,
+            &previous.stark_common,
+        );
+        private_inputs.extend(self.chunk_inputs.pack_private_verifier_values(
+            &table_public_inputs(chunk),
+            &chunk.proof,
+            &chunk.stark_common,
+        ));
+        assert_public_ops_have_rows(&self.verification_circuit)?;
+
+        let mut runner = self.verification_circuit.runner();
+        runner.set_public_inputs(&public_inputs).map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set cached private compact append public inputs: {error:?}"
+            ))
+        })?;
+        runner
+            .set_private_inputs(&private_inputs)
+            .map_err(|error| {
+                ProofError::Plonky3(format!(
+                    "set cached private compact append verifier inputs: {error:?}"
+                ))
+            })?;
+        set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+            &mut runner,
+            &self.previous_mmcs_op_ids,
+            &previous.proof.opening_proof,
+            Poseidon2Config::GOLDILOCKS_D2_W8,
+        )
+        .map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set cached previous compact append FRI private data: {error}"
+            ))
+        })?;
+        set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+            &mut runner,
+            &self.chunk_mmcs_op_ids,
+            &chunk.proof.opening_proof,
+            Poseidon2Config::GOLDILOCKS_D2_W8,
+        )
+        .map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set cached chunk compact append FRI private data: {error}"
+            ))
+        })?;
+        let traces = runner.run().map_err(|error| {
+            ProofError::Plonky3(format!(
+                "run cached private compact append verifier circuit: {error:?}"
+            ))
+        })?;
+
+        let prover = recursive_verifier_prover(goldilocks_config(), self.table_packing.clone());
+        let proof = prover
+            .prove_all_tables(&traces, &self.circuit_prover_data)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+        Ok(AggregatedRecursiveBatchProof {
+            public_inputs,
+            proof,
+        })
+    }
+}
+
 pub fn verify_recursive_batch(proof: &RecursiveBatchProof) -> Result<(), ProofError> {
     let expected_public_values = flatten_extension_values(&proof.public_inputs);
     if proof.proof.primitive_public_values[PrimitiveTable::Public as usize]
@@ -693,6 +827,26 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
         public_inputs,
         proof,
     })
+}
+
+pub(crate) fn prove_private_append_batch_proof_with_compact_chunk_summary(
+    previous: &BatchStarkProof<GoldilocksConfig>,
+    chunk: &BatchStarkProof<GoldilocksConfig>,
+    summary: &[F],
+    chunk_summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<AggregatedRecursiveBatchProof, ProofError> {
+    let prover = PrivateCompactAppendRecursionProver::new(
+        previous,
+        chunk,
+        chunk_summary,
+        chunk_public_offset,
+        full_layout,
+        compact_layout,
+    )?;
+    prover.prove(previous, chunk, summary)
 }
 
 pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
@@ -1001,6 +1155,73 @@ fn build_private_verifier_circuit_with_compact_leaf_summary(
     Ok((circuit, verifier_inputs, mmcs_op_ids))
 }
 
+fn build_private_append_verifier_circuit_with_compact_chunk_summary(
+    previous: &BatchStarkProof<GoldilocksConfig>,
+    chunk: &BatchStarkProof<GoldilocksConfig>,
+    chunk_summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<AggregationVerifierCircuit, ProofError> {
+    validate_summary_layout(compact_layout)?;
+    let mut builder = CircuitBuilder::<Challenge>::new();
+    enable_recursive_verifier_ops(&mut builder);
+
+    let recursive_config = goldilocks_config();
+    let recursive_table_provers = recursive_batch_table_provers();
+    let recursive_fri_params = recursive_fri_verifier_params();
+    let (previous_inputs, previous_mmcs_op_ids) = add_private_batch_verifier_to_builder(
+        &mut builder,
+        previous,
+        &recursive_config,
+        &recursive_table_provers,
+        &recursive_fri_params,
+    )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &previous_inputs);
+
+    let base_config = base_goldilocks_config();
+    let base_table_provers = base_table_provers(chunk);
+    let base_fri_params = base_fri_verifier_params();
+    let (chunk_inputs, chunk_mmcs_op_ids) = add_private_batch_verifier_to_builder(
+        &mut builder,
+        chunk,
+        &base_config,
+        &base_table_provers,
+        &base_fri_params,
+    )?;
+    touch_private_verifier_boundary_inputs(&mut builder, &chunk_inputs);
+
+    let summary_targets = allocate_summary_public_inputs(&mut builder, compact_layout.len);
+    let previous_summary =
+        child_summary_targets(&mut builder, &previous_inputs, previous, compact_layout.len)?;
+    let chunk_summary_targets = compact_leaf_summary_targets(
+        &mut builder,
+        &chunk_inputs,
+        chunk_summary,
+        chunk_public_offset,
+        full_layout,
+        compact_layout,
+    )?;
+    constrain_aggregate_summary_targets(
+        &mut builder,
+        &previous_summary,
+        &chunk_summary_targets,
+        &summary_targets,
+        compact_layout,
+    )?;
+    let circuit = builder
+        .build()
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+
+    Ok((
+        circuit,
+        previous_inputs,
+        chunk_inputs,
+        previous_mmcs_op_ids,
+        chunk_mmcs_op_ids,
+    ))
+}
+
 type AggregationVerifierCircuit = (
     Circuit<Challenge>,
     VerifierInputs,
@@ -1262,12 +1483,40 @@ fn constrain_compact_leaf_summary(
         return Err(ProofError::StatementMismatch);
     }
 
-    for (target, &value) in summary_targets[..chunk_public_offset]
-        .iter()
-        .zip(summary.iter())
+    let expected_targets = compact_leaf_summary_targets(
+        builder,
+        verifier_inputs,
+        summary,
+        chunk_public_offset,
+        full_layout,
+        compact_layout,
+    )?;
+    connect_ranges(
+        builder,
+        summary_targets,
+        0..summary_targets.len(),
+        &expected_targets,
+        0..expected_targets.len(),
+    )?;
+
+    Ok(())
+}
+
+fn compact_leaf_summary_targets(
+    builder: &mut CircuitBuilder<Challenge>,
+    verifier_inputs: &VerifierInputs,
+    summary: &[F],
+    chunk_public_offset: usize,
+    full_layout: &ChainSummaryLayout,
+    compact_layout: &ChainSummaryLayout,
+) -> Result<Vec<ExprId>, ProofError> {
+    validate_summary_layout(full_layout)?;
+    validate_summary_layout(compact_layout)?;
+    if summary.len() != compact_layout.len
+        || chunk_public_offset > summary.len()
+        || chunk_public_offset > full_layout.len
     {
-        let value = builder.define_const(Challenge::from(value));
-        assert_equal(builder, *target, value);
+        return Err(ProofError::StatementMismatch);
     }
 
     let chunk_public_targets = public_air_targets(verifier_inputs)?;
@@ -1295,52 +1544,48 @@ fn constrain_compact_leaf_summary(
     )
     .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
-    connect_summary_range_to_digest(
-        builder,
-        summary_targets,
-        compact_layout.input_accumulator.clone(),
-        &input_digest,
-    )?;
-    connect_summary_range_to_chunk_range(
-        builder,
-        summary_targets,
-        compact_layout.bsk_digest_in.clone(),
+    let mut targets = Vec::with_capacity(compact_layout.len);
+    for &value in &summary[..chunk_public_offset] {
+        targets.push(builder.define_const(Challenge::from(value)));
+    }
+
+    if targets.len() != compact_layout.input_accumulator.start {
+        return Err(ProofError::StatementMismatch);
+    }
+    targets.extend_from_slice(&input_digest);
+    push_chunk_range_targets(
+        &mut targets,
         chunk_public_targets,
         full_layout.bsk_digest_in.clone(),
         chunk_public_offset,
     )?;
-    connect_summary_range_to_chunk_range(
-        builder,
-        summary_targets,
-        compact_layout.bsk_digest_out.clone(),
+    push_chunk_range_targets(
+        &mut targets,
         chunk_public_targets,
         full_layout.bsk_digest_out.clone(),
         chunk_public_offset,
     )?;
-    connect_summary_range_to_chunk_range(
-        builder,
-        summary_targets,
-        compact_layout.mask_digest_in.clone(),
+    push_chunk_range_targets(
+        &mut targets,
         chunk_public_targets,
         full_layout.mask_digest_in.clone(),
         chunk_public_offset,
     )?;
-    connect_summary_range_to_chunk_range(
-        builder,
-        summary_targets,
-        compact_layout.mask_digest_out.clone(),
+    push_chunk_range_targets(
+        &mut targets,
         chunk_public_targets,
         full_layout.mask_digest_out.clone(),
         chunk_public_offset,
     )?;
-    connect_summary_range_to_digest(
-        builder,
-        summary_targets,
-        compact_layout.output_accumulator.clone(),
-        &output_digest,
-    )?;
+    if targets.len() != compact_layout.output_accumulator.start {
+        return Err(ProofError::StatementMismatch);
+    }
+    targets.extend_from_slice(&output_digest);
+    if targets.len() != compact_layout.len {
+        return Err(ProofError::StatementMismatch);
+    }
 
-    Ok(())
+    Ok(targets)
 }
 
 fn constrain_pbs_keyswitch_link_summary(
@@ -1427,17 +1672,35 @@ fn constrain_aggregate_summary(
 
     let left_summary = child_summary_targets(builder, left_inputs, left, layout.len)?;
     let right_summary = child_summary_targets(builder, right_inputs, right, layout.len)?;
-
-    connect_range(
+    constrain_aggregate_summary_targets(
         builder,
         &left_summary,
         &right_summary,
-        layout.params.clone(),
-    )?;
+        summary_targets,
+        layout,
+    )
+}
+
+fn constrain_aggregate_summary_targets(
+    builder: &mut CircuitBuilder<Challenge>,
+    left_summary: &[ExprId],
+    right_summary: &[ExprId],
+    summary_targets: &[ExprId],
+    layout: &ChainSummaryLayout,
+) -> Result<(), ProofError> {
+    validate_summary_layout(layout)?;
+    if left_summary.len() != layout.len
+        || right_summary.len() != layout.len
+        || summary_targets.len() != layout.len
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+
+    connect_range(builder, left_summary, right_summary, layout.params.clone())?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &left_summary,
+        left_summary,
         layout.params.clone(),
     )?;
 
@@ -1449,60 +1712,60 @@ fn constrain_aggregate_summary(
 
     connect_ranges(
         builder,
-        &left_summary,
+        left_summary,
         layout.output_accumulator.clone(),
-        &right_summary,
+        right_summary,
         layout.input_accumulator.clone(),
     )?;
     connect_ranges(
         builder,
-        &left_summary,
+        left_summary,
         layout.bsk_digest_out.clone(),
-        &right_summary,
+        right_summary,
         layout.bsk_digest_in.clone(),
     )?;
     connect_ranges(
         builder,
-        &left_summary,
+        left_summary,
         layout.mask_digest_out.clone(),
-        &right_summary,
+        right_summary,
         layout.mask_digest_in.clone(),
     )?;
 
     connect_range_to_summary(
         builder,
         summary_targets,
-        &left_summary,
+        left_summary,
         layout.input_accumulator.clone(),
     )?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &left_summary,
+        left_summary,
         layout.bsk_digest_in.clone(),
     )?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &right_summary,
+        right_summary,
         layout.bsk_digest_out.clone(),
     )?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &left_summary,
+        left_summary,
         layout.mask_digest_in.clone(),
     )?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &right_summary,
+        right_summary,
         layout.mask_digest_out.clone(),
     )?;
     connect_range_to_summary(
         builder,
         summary_targets,
-        &right_summary,
+        right_summary,
         layout.output_accumulator.clone(),
     )?;
 
@@ -1653,10 +1916,8 @@ fn connect_ranges(
     Ok(())
 }
 
-fn connect_summary_range_to_chunk_range(
-    builder: &mut CircuitBuilder<Challenge>,
-    summary_targets: &[ExprId],
-    summary_range: Range<usize>,
+fn push_chunk_range_targets(
+    targets: &mut Vec<ExprId>,
     chunk_public_targets: &[ExprId],
     full_summary_range: Range<usize>,
     chunk_public_offset: usize,
@@ -1666,28 +1927,8 @@ fn connect_summary_range_to_chunk_range(
         chunk_public_offset,
         chunk_public_targets.len(),
     )?;
-    connect_ranges(
-        builder,
-        summary_targets,
-        summary_range,
-        chunk_public_targets,
-        chunk_range,
-    )
-}
-
-fn connect_summary_range_to_digest(
-    builder: &mut CircuitBuilder<Challenge>,
-    summary_targets: &[ExprId],
-    summary_range: Range<usize>,
-    digest_targets: &[ExprId; SELECTOR_DIGEST_WIDTH],
-) -> Result<(), ProofError> {
-    connect_ranges(
-        builder,
-        summary_targets,
-        summary_range,
-        digest_targets,
-        0..SELECTOR_DIGEST_WIDTH,
-    )
+    targets.extend(chunk_public_targets[chunk_range].iter().copied());
+    Ok(())
 }
 
 fn summary_range_to_chunk_range(
