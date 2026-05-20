@@ -6,12 +6,15 @@ mod range_check;
 mod recursive;
 
 use core::{fmt, ops::Range};
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use p3_batch_stark::common::CommonData;
 use p3_batch_stark::ProverData;
 use p3_challenger::DuplexChallenger;
 use p3_circuit::circuit::Circuit;
 use p3_circuit::ops::Poseidon2Config;
+use p3_circuit::{AluOpKind, Op};
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
@@ -173,6 +176,167 @@ pub struct ActualPbsChainChunkProof {
     pub exponents: Vec<usize>,
     pub public_inputs: Vec<P3Goldilocks>,
     pub proof: BatchStarkProof<GoldilocksConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamedCount {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CircuitOperationProfile {
+    pub total_ops: usize,
+    pub witness_count: usize,
+    pub public_inputs: usize,
+    pub private_inputs: usize,
+    pub const_ops: usize,
+    pub public_ops: usize,
+    pub hint_ops: usize,
+    pub hint_outputs: usize,
+    pub non_primitive_ops: usize,
+    pub alu_add_ops: usize,
+    pub alu_mul_ops: usize,
+    pub alu_bool_check_ops: usize,
+    pub alu_mul_add_ops: usize,
+    pub alu_horner_acc_ops: usize,
+    pub non_primitive_by_type: Vec<NamedCount>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CircuitTraceProfile {
+    pub witness_rows: usize,
+    pub const_rows: usize,
+    pub public_rows: usize,
+    pub alu_rows: usize,
+    pub non_primitive_rows: Vec<NamedCount>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CircuitProveTiming {
+    pub air_prep_us: u128,
+    pub prover_data_us: u128,
+    pub witness_run_us: u128,
+    pub prove_us: u128,
+    pub total_us: u128,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CircuitProveProfile {
+    pub operations: CircuitOperationProfile,
+    pub trace: CircuitTraceProfile,
+    pub timing: CircuitProveTiming,
+    pub range_check_bit_counts: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActualPbsLeafLogicalProfile {
+    pub step_count: usize,
+    pub external_products: usize,
+    pub decomposition_polys: usize,
+    pub decomposition_coefficients: usize,
+    pub digit_range_checks: usize,
+    pub error_range_checks: usize,
+    pub error_sign_bool_checks: usize,
+    pub torus_bit_bool_checks: usize,
+    pub digit_ntts: usize,
+    pub inverse_ntts: usize,
+    pub ntt_butterflies: usize,
+    pub pointwise_ntt_muls: usize,
+    pub rotation_selects: usize,
+    pub ggsw_ntt_private_inputs: usize,
+    pub decomposition_private_inputs: usize,
+    pub mask_private_inputs: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsChainChunkShapeProfile {
+    pub params: Params,
+    pub step_count: usize,
+    pub build_us: u128,
+    pub operations: CircuitOperationProfile,
+    pub logical: ActualPbsLeafLogicalProfile,
+    pub range_check_bit_counts: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActualPbsChainChunkProveProfile {
+    pub params: Params,
+    pub step_count: usize,
+    pub build_us: u128,
+    pub logical: ActualPbsLeafLogicalProfile,
+    pub circuit: CircuitProveProfile,
+}
+
+pub struct ActualPbsChainChunkBaseProver {
+    params: Params,
+    step_count: usize,
+    circuit: Circuit<P3Goldilocks>,
+    table_packing: TablePacking,
+    range_bit_counts: Vec<usize>,
+    circuit_prover_data: CircuitProverData<GoldilocksConfig>,
+}
+
+impl ActualPbsChainChunkBaseProver {
+    pub fn new(params: &Params, step_count: usize) -> Result<Self, ProofError> {
+        let circuit = build_actual_pbs_chain_chunk_shape_circuit(params, step_count)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+        let table_packing = base_proof_table_packing();
+        let range_bit_counts = range_check_bit_counts(&circuit);
+        let preprocessors = base_preprocessors(&range_bit_counts);
+        let air_builders = base_air_builders(&range_bit_counts);
+        let config = base_goldilocks_config();
+        let (airs_degrees, primitive_columns, non_primitive_columns) =
+            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
+                &circuit,
+                &table_packing,
+                &preprocessors,
+                &air_builders,
+                ConstraintProfile::Standard,
+            )
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+        let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+        let circuit_prover_data =
+            CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+
+        Ok(Self {
+            params: params.clone(),
+            step_count,
+            circuit,
+            table_packing,
+            range_bit_counts,
+            circuit_prover_data,
+        })
+    }
+
+    pub fn prove(
+        &self,
+        instance: &ActualPbsChainChunkInstance,
+    ) -> Result<ActualPbsChainChunkProof, ProofError> {
+        if instance.params != self.params || instance.step_count() != self.step_count {
+            return Err(ProofError::StatementMismatch);
+        }
+
+        let public_inputs = instance.public_inputs();
+        let private_inputs = instance.private_inputs();
+        let proof = prove_circuit_with_prepared(
+            &self.circuit,
+            &self.table_packing,
+            &self.range_bit_counts,
+            &self.circuit_prover_data,
+            &public_inputs,
+            &private_inputs,
+        )?;
+
+        Ok(ActualPbsChainChunkProof {
+            params: instance.params.clone(),
+            step_count: instance.step_count(),
+            exponents: instance.exponents.clone(),
+            public_inputs,
+            proof,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1075,6 +1239,54 @@ pub fn prove_actual_pbs_chain_chunk(
     })
 }
 
+pub fn profile_actual_pbs_chain_chunk_shape(
+    params: &Params,
+    step_count: usize,
+) -> Result<ActualPbsChainChunkShapeProfile, ProofError> {
+    let build_started = Instant::now();
+    let circuit = build_actual_pbs_chain_chunk_shape_circuit(params, step_count)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let build_us = build_started.elapsed().as_micros();
+    let range_check_bit_counts = range_check_bit_counts(&circuit);
+    Ok(ActualPbsChainChunkShapeProfile {
+        params: params.clone(),
+        step_count,
+        build_us,
+        operations: profile_circuit_operations(&circuit),
+        logical: actual_pbs_leaf_logical_profile(params, step_count),
+        range_check_bit_counts,
+    })
+}
+
+pub fn prove_actual_pbs_chain_chunk_profiled(
+    instance: &ActualPbsChainChunkInstance,
+) -> Result<(ActualPbsChainChunkProof, ActualPbsChainChunkProveProfile), ProofError> {
+    let build_started = Instant::now();
+    let circuit = build_actual_pbs_chain_chunk_circuit(instance)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let build_us = build_started.elapsed().as_micros();
+    let public_inputs = instance.public_inputs();
+    let private_inputs = instance.private_inputs();
+    let (proof, circuit_profile) =
+        prove_circuit_profiled(&circuit, &public_inputs, &private_inputs)?;
+
+    let proof = ActualPbsChainChunkProof {
+        params: instance.params.clone(),
+        step_count: instance.step_count(),
+        exponents: instance.exponents.clone(),
+        public_inputs,
+        proof,
+    };
+    let profile = ActualPbsChainChunkProveProfile {
+        params: instance.params.clone(),
+        step_count: instance.step_count(),
+        build_us,
+        logical: actual_pbs_leaf_logical_profile(&instance.params, instance.step_count()),
+        circuit: circuit_profile,
+    };
+    Ok((proof, profile))
+}
+
 pub fn verify_actual_pbs_chain_chunk_proof(
     instance: &ActualPbsChainChunkInstance,
     proof: &ActualPbsChainChunkProof,
@@ -1154,6 +1366,12 @@ pub fn prove_private_compact_recursive_actual_pbs_chain_chunk(
     instance: &ActualPbsChainChunkInstance,
 ) -> Result<CompactRecursiveActualPbsChainChunkProof, ProofError> {
     let base = prove_actual_pbs_chain_chunk(instance)?;
+    prove_private_compact_recursive_actual_pbs_chain_chunk_from_base(base)
+}
+
+pub fn prove_private_compact_recursive_actual_pbs_chain_chunk_from_base(
+    base: ActualPbsChainChunkProof,
+) -> Result<CompactRecursiveActualPbsChainChunkProof, ProofError> {
     let statement = base.public_statement();
     let chain_summary = CompactActualPbsChainSummary::from_chunk_statement(&statement)?;
     let recursion = recursive::prove_private_recursive_batch_with_compact_leaf_summary(
@@ -2148,16 +2366,135 @@ fn aggregation_node_batch_proof<'a>(
     }
 }
 
+fn profile_circuit_operations(circuit: &Circuit<P3Goldilocks>) -> CircuitOperationProfile {
+    let mut profile = CircuitOperationProfile {
+        total_ops: circuit.ops.len(),
+        witness_count: circuit.witness_count as usize,
+        public_inputs: circuit.public_flat_len,
+        private_inputs: circuit.private_flat_len,
+        ..CircuitOperationProfile::default()
+    };
+    let mut non_primitives = BTreeMap::<String, usize>::new();
+
+    for op in &circuit.ops {
+        match op {
+            Op::Const { .. } => profile.const_ops += 1,
+            Op::Public { .. } => profile.public_ops += 1,
+            Op::Alu { kind, .. } => match kind {
+                AluOpKind::Add => profile.alu_add_ops += 1,
+                AluOpKind::Mul => profile.alu_mul_ops += 1,
+                AluOpKind::BoolCheck => profile.alu_bool_check_ops += 1,
+                AluOpKind::MulAdd => profile.alu_mul_add_ops += 1,
+                AluOpKind::HornerAcc => profile.alu_horner_acc_ops += 1,
+            },
+            Op::Hint { outputs, .. } => {
+                profile.hint_ops += 1;
+                profile.hint_outputs += outputs.len();
+            }
+            Op::NonPrimitiveOpWithExecutor { executor, .. } => {
+                profile.non_primitive_ops += 1;
+                *non_primitives
+                    .entry(executor.op_type().as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    profile.non_primitive_by_type = named_counts(non_primitives);
+    profile
+}
+
+fn profile_traces(traces: &p3_circuit::Traces<P3Goldilocks>) -> CircuitTraceProfile {
+    let mut non_primitive_rows = BTreeMap::<String, usize>::new();
+    for (op_type, trace) in &traces.non_primitive_traces {
+        non_primitive_rows.insert(op_type.as_str().to_string(), trace.rows());
+    }
+
+    CircuitTraceProfile {
+        witness_rows: traces.witness_trace.num_rows(),
+        const_rows: traces.const_trace.values.len(),
+        public_rows: traces.public_trace.values.len(),
+        alu_rows: traces.alu_trace.op_kind.len(),
+        non_primitive_rows: named_counts(non_primitive_rows),
+    }
+}
+
+fn named_counts(counts: BTreeMap<String, usize>) -> Vec<NamedCount> {
+    counts
+        .into_iter()
+        .map(|(name, count)| NamedCount { name, count })
+        .collect()
+}
+
+fn actual_pbs_leaf_logical_profile(
+    params: &Params,
+    step_count: usize,
+) -> ActualPbsLeafLogicalProfile {
+    let polynomial_size = params.polynomial_size;
+    let glwe_polys = params.glwe_dimension + 1;
+    let levels = params.decomposition_level_count;
+    let external_products = step_count * glwe_polys;
+    let decomposition_polys = external_products;
+    let decomposition_coefficients = decomposition_polys * polynomial_size;
+    let digit_range_checks = decomposition_coefficients * levels;
+    let approximate_decomposition =
+        params.decomposition_base_log * params.decomposition_level_count != 64;
+    let error_range_checks = usize::from(approximate_decomposition) * decomposition_coefficients;
+    let error_sign_bool_checks = error_range_checks;
+    let digit_ntts = decomposition_polys * levels;
+    let inverse_ntts = digit_ntts * glwe_polys;
+    let log_n = polynomial_size.trailing_zeros() as usize;
+    let butterflies_per_ntt = (polynomial_size / 2) * log_n;
+    let ntt_butterflies = (digit_ntts + inverse_ntts) * butterflies_per_ntt;
+    let pointwise_ntt_muls = inverse_ntts * polynomial_size;
+    let exponent_bits = params.exponent_modulus().trailing_zeros() as usize;
+    let rotation_selects = step_count * glwe_polys * polynomial_size * exponent_bits;
+    let ggsw_ntt_private_inputs = step_count * glwe_polys * levels * glwe_polys * polynomial_size;
+    let decomposition_private_inputs =
+        decomposition_coefficients * (levels + if approximate_decomposition { 2 } else { 0 });
+
+    ActualPbsLeafLogicalProfile {
+        step_count,
+        external_products,
+        decomposition_polys,
+        decomposition_coefficients,
+        digit_range_checks,
+        error_range_checks,
+        error_sign_bool_checks,
+        torus_bit_bool_checks: step_count * 64,
+        digit_ntts,
+        inverse_ntts,
+        ntt_butterflies,
+        pointwise_ntt_muls,
+        rotation_selects,
+        ggsw_ntt_private_inputs,
+        decomposition_private_inputs,
+        mask_private_inputs: step_count,
+    }
+}
+
 fn prove_circuit(
     circuit: &Circuit<P3Goldilocks>,
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
+    let (proof, _profile) = prove_circuit_profiled(circuit, public_inputs, private_inputs)?;
+    Ok(proof)
+}
+
+fn prove_circuit_profiled(
+    circuit: &Circuit<P3Goldilocks>,
+    public_inputs: &[P3Goldilocks],
+    private_inputs: &[P3Goldilocks],
+) -> Result<(BatchStarkProof<GoldilocksConfig>, CircuitProveProfile), ProofError> {
+    let total_started = Instant::now();
     let config = base_goldilocks_config();
     let table_packing = base_proof_table_packing();
     let range_bit_counts = range_check_bit_counts(circuit);
     let preprocessors = base_preprocessors(&range_bit_counts);
     let air_builders = base_air_builders(&range_bit_counts);
+
+    let air_prep_started = Instant::now();
     let (airs_degrees, primitive_columns, non_primitive_columns) =
         get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
             circuit,
@@ -2168,10 +2505,61 @@ fn prove_circuit(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+    let air_prep_us = air_prep_started.elapsed().as_micros();
+
+    let prover_data_started = Instant::now();
     let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+    let prover_data_us = prover_data_started.elapsed().as_micros();
 
+    let witness_started = Instant::now();
+    let mut runner = circuit.runner();
+    runner
+        .set_public_inputs(public_inputs)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    runner
+        .set_private_inputs(private_inputs)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let traces = runner
+        .run()
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let witness_run_us = witness_started.elapsed().as_micros();
+    let trace_profile = profile_traces(&traces);
+
+    let mut prover = BatchStarkProver::new(config).with_table_packing(table_packing);
+    register_base_table_provers(&mut prover, &range_bit_counts);
+    let prove_started = Instant::now();
+    let proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    let prove_us = prove_started.elapsed().as_micros();
+
+    Ok((
+        proof,
+        CircuitProveProfile {
+            operations: profile_circuit_operations(circuit),
+            trace: trace_profile,
+            timing: CircuitProveTiming {
+                air_prep_us,
+                prover_data_us,
+                witness_run_us,
+                prove_us,
+                total_us: total_started.elapsed().as_micros(),
+            },
+            range_check_bit_counts: range_bit_counts,
+        },
+    ))
+}
+
+fn prove_circuit_with_prepared(
+    circuit: &Circuit<P3Goldilocks>,
+    table_packing: &TablePacking,
+    range_bit_counts: &[usize],
+    circuit_prover_data: &CircuitProverData<GoldilocksConfig>,
+    public_inputs: &[P3Goldilocks],
+    private_inputs: &[P3Goldilocks],
+) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
     let mut runner = circuit.runner();
     runner
         .set_public_inputs(public_inputs)
@@ -2183,10 +2571,11 @@ fn prove_circuit(
         .run()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
-    let mut prover = BatchStarkProver::new(config).with_table_packing(table_packing);
-    register_base_table_provers(&mut prover, &range_bit_counts);
+    let mut prover =
+        BatchStarkProver::new(base_goldilocks_config()).with_table_packing(table_packing.clone());
+    register_base_table_provers(&mut prover, range_bit_counts);
     prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+        .prove_all_tables(&traces, circuit_prover_data)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 

@@ -122,6 +122,8 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 1 ta
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaves-recursive target/pbs-checkpoints/toy-root.bin target/pbs-checkpoints/toy-leaf-0.bin target/pbs-checkpoints/toy-leaf-1.bin
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaf-dir-recursive target/pbs-checkpoints/toy-root-from-dir.bin target/pbs-checkpoints 2
 cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin
+cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 shape
+cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 prove
 cargo run -p tfheprus-cli -- profile-pbs-chain-tree paper-v1 8 728
 cargo run -p tfheprus-cli -- run-actual-pbs-native
 cargo run -p tfheprus-cli -- profile-actual-pbs moderate
@@ -327,6 +329,16 @@ and verified the root artifact with `params_n=728`, `total_steps=728`,
 The run reported `total_prove_us=2621614911`, `aggregate_us=156483219`,
 `total_us=2787146162`, `leaf_artifact_bytes=165374478`,
 `aggregate_artifact_bytes=16124512`, and `root_artifact_bytes=179105`.
+The leaf-cost profiler is available for the next optimization pass:
+`profile-pbs-chain-leaf-cost paper-v1 8 shape` reports an 8-step leaf with
+`total_ops=4333716`, `witness_count=4413604`, `private_inputs=229896`,
+`alu_rows=4212784`, `digit_ntts=64`, `inverse_ntts=128`,
+`digit_range_checks=65536`, and `error_range_checks=16384`.
+`profile-pbs-chain-leaf-cost paper-v1 8 prove` verified the base 8-step leaf
+with `build_us=1620799`, `air_prep_us=789986`, `prover_data_us=5271495`,
+`witness_run_us=293074`, `prove_us=13634420`, and `verify_us=26709`. Since
+paper-v1 uses 91 same-shaped leaves, the compact recursive leaf batch path now
+caches the base leaf circuit/prover data and reuses it for newly written leaves.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.

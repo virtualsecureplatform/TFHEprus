@@ -37,9 +37,9 @@ use tfheprus_prover::{
     deserialize_compact_recursive_actual_pbs_chain_chunk_proof,
     deserialize_recursive_actual_pbs_chain_chunk_proof,
     glwe_keyswitch_private_key_digest_proof_serialized_len, glwe_keyswitch_proof_serialized_len,
-    prove_actual_pbs, prove_actual_pbs_chain_chunk, prove_actual_pbs_step,
-    prove_actual_pbs_step_chain, prove_actual_pbs_step_private,
-    prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
+    profile_actual_pbs_chain_chunk_shape, prove_actual_pbs, prove_actual_pbs_chain_chunk,
+    prove_actual_pbs_chain_chunk_profiled, prove_actual_pbs_step, prove_actual_pbs_step_chain,
+    prove_actual_pbs_step_private, prove_aggregated_recursive_actual_pbs_chain_chunk_pair,
     prove_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_aggregated_recursive_actual_pbs_chain_node_pair, prove_and_verify_keccak_f1600,
     prove_compact_pbs_root_keyswitch_recursive, prove_glwe_keyswitch,
@@ -47,7 +47,7 @@ use tfheprus_prover::{
     prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair,
-    prove_private_compact_recursive_actual_pbs_chain_chunk,
+    prove_private_compact_recursive_actual_pbs_chain_chunk_from_base,
     prove_private_recursive_actual_pbs_chain_chunk, prove_recursive_actual_pbs_chain_chunk,
     prove_sample_extract, serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     serialize_aggregated_recursive_actual_pbs_chain_node_proof,
@@ -69,7 +69,7 @@ use tfheprus_prover::{
     verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
-    ActualPbsChainChunkStatement, ActualPbsChainSummary,
+    ActualPbsChainChunkBaseProver, ActualPbsChainChunkStatement, ActualPbsChainSummary,
     AggregatedRecursiveActualPbsChainNodeProof, CompactActualPbsChainSummary,
     CompactAggregatedRecursiveActualPbsChainNodeProof, CompactRecursiveActualPbsChainChunkProof,
     CompactRecursiveActualPbsChainNode, RecursiveActualPbsChainChunkProof,
@@ -278,6 +278,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             parse_required_chunk_count_arg(&args)?,
             parse_required_arg(&args, 5, "benchmark artifact directory")?,
             true,
+        )?,
+        Some("profile-pbs-chain-leaf-cost") => profile_pbs_chain_leaf_cost_demo(
+            parse_preset_arg(&args)?,
+            parse_chunk_step_count_arg(&args)?,
+            parse_profile_leaf_mode_arg(&args)?,
         )?,
         Some("profile-pbs-chain-tree") => profile_pbs_chain_tree_demo(
             parse_preset_arg(&args)?,
@@ -1711,6 +1716,7 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
     let mut max_base_private_inputs = 0usize;
     let mut max_recursive_public_inputs = 0usize;
     let mut total_artifact_bytes = 0usize;
+    let mut cached_base_prover: Option<ActualPbsChainChunkBaseProver> = None;
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
@@ -1756,7 +1762,17 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
             (proof, bytes.len(), "reused", Duration::ZERO, verify_time)
         } else {
             let prove_started = Instant::now();
-            let proof = prove_private_compact_recursive_actual_pbs_chain_chunk(&instance)?;
+            if cached_base_prover.is_none() {
+                cached_base_prover = Some(ActualPbsChainChunkBaseProver::new(
+                    &params,
+                    chunk_step_count,
+                )?);
+            }
+            let base = cached_base_prover
+                .as_ref()
+                .expect("cached base prover was initialized")
+                .prove(&instance)?;
+            let proof = prove_private_compact_recursive_actual_pbs_chain_chunk_from_base(base)?;
             let prove_time = prove_started.elapsed();
             let verify_time = if verify_leaf_artifacts {
                 let verify_started = Instant::now();
@@ -3035,6 +3051,156 @@ fn profile_actual_pbs_demo(preset: ParamPreset) {
     );
 }
 
+fn profile_pbs_chain_leaf_cost_demo(
+    preset: ParamPreset,
+    chunk_step_count: usize,
+    prove: bool,
+) -> Result<(), Box<dyn Error>> {
+    let params = preset.params();
+    if chunk_step_count == 0 || chunk_step_count > params.lwe_dimension {
+        return Err(format!(
+            "chunk step count must be in 1..={} for this preset",
+            params.lwe_dimension
+        )
+        .into());
+    }
+
+    print_param_line(preset.name(), &params);
+    if prove {
+        let (_params, instance) =
+            actual_pbs_chain_chunk_instance(params.clone(), chunk_step_count)?;
+        let (proof, profile) = prove_actual_pbs_chain_chunk_profiled(&instance)?;
+        let verify_started = Instant::now();
+        verify_actual_pbs_chain_chunk_proof(&instance, &proof)?;
+        let verify_us = verify_started.elapsed().as_micros();
+
+        print_leaf_profile_header(
+            preset.name(),
+            chunk_step_count,
+            "prove",
+            profile.build_us,
+            &profile.circuit.operations,
+            &profile.circuit.range_check_bit_counts,
+        );
+        print_leaf_logical_profile(&profile.logical);
+        print_leaf_trace_profile(&profile.circuit.trace);
+        println!(
+            "leaf_timings: build_us={}, air_prep_us={}, prover_data_us={}, witness_run_us={}, prove_us={}, total_prove_path_us={}, verify_us={}",
+            profile.build_us,
+            profile.circuit.timing.air_prep_us,
+            profile.circuit.timing.prover_data_us,
+            profile.circuit.timing.witness_run_us,
+            profile.circuit.timing.prove_us,
+            profile.circuit.timing.total_us,
+            verify_us
+        );
+        println!(
+            "leaf_result: public_inputs={}, private_inputs={}, output_body0={}, exponents={:?}",
+            profile.circuit.operations.public_inputs,
+            profile.circuit.operations.private_inputs,
+            instance.output_accumulator.body[0].value(),
+            proof.exponents
+        );
+    } else {
+        let profile = profile_actual_pbs_chain_chunk_shape(&params, chunk_step_count)?;
+        print_leaf_profile_header(
+            preset.name(),
+            chunk_step_count,
+            "shape",
+            profile.build_us,
+            &profile.operations,
+            &profile.range_check_bit_counts,
+        );
+        print_leaf_logical_profile(&profile.logical);
+    }
+
+    Ok(())
+}
+
+fn print_leaf_profile_header(
+    preset: &str,
+    chunk_step_count: usize,
+    mode: &str,
+    build_us: u128,
+    operations: &tfheprus_prover::CircuitOperationProfile,
+    range_check_bit_counts: &[usize],
+) {
+    println!(
+        "pbs-chain-leaf-cost: preset={}, steps={}, mode={}, build_us={}, total_ops={}, witness_count={}, public_inputs={}, private_inputs={}, range_check_bit_counts=[{}]",
+        preset,
+        chunk_step_count,
+        mode,
+        build_us,
+        operations.total_ops,
+        operations.witness_count,
+        operations.public_inputs,
+        operations.private_inputs,
+        format_usize_list(range_check_bit_counts)
+    );
+    println!(
+        "leaf_ops: const={}, public={}, hint_ops={}, hint_outputs={}, alu_add={}, alu_mul={}, alu_bool={}, alu_mul_add={}, alu_horner={}, non_primitive={}, non_primitive_by_type=[{}]",
+        operations.const_ops,
+        operations.public_ops,
+        operations.hint_ops,
+        operations.hint_outputs,
+        operations.alu_add_ops,
+        operations.alu_mul_ops,
+        operations.alu_bool_check_ops,
+        operations.alu_mul_add_ops,
+        operations.alu_horner_acc_ops,
+        operations.non_primitive_ops,
+        format_named_counts(&operations.non_primitive_by_type)
+    );
+}
+
+fn print_leaf_logical_profile(profile: &tfheprus_prover::ActualPbsLeafLogicalProfile) {
+    println!(
+        "leaf_logical: external_products={}, decomposition_polys={}, decomposition_coefficients={}, digit_range_checks={}, error_range_checks={}, error_sign_bool_checks={}, torus_bit_bool_checks={}, digit_ntts={}, inverse_ntts={}, ntt_butterflies={}, pointwise_ntt_muls={}, rotation_selects={}, ggsw_ntt_private_inputs={}, decomposition_private_inputs={}, mask_private_inputs={}",
+        profile.external_products,
+        profile.decomposition_polys,
+        profile.decomposition_coefficients,
+        profile.digit_range_checks,
+        profile.error_range_checks,
+        profile.error_sign_bool_checks,
+        profile.torus_bit_bool_checks,
+        profile.digit_ntts,
+        profile.inverse_ntts,
+        profile.ntt_butterflies,
+        profile.pointwise_ntt_muls,
+        profile.rotation_selects,
+        profile.ggsw_ntt_private_inputs,
+        profile.decomposition_private_inputs,
+        profile.mask_private_inputs
+    );
+}
+
+fn print_leaf_trace_profile(profile: &tfheprus_prover::CircuitTraceProfile) {
+    println!(
+        "leaf_trace: witness_rows={}, const_rows={}, public_rows={}, alu_rows={}, non_primitive_rows=[{}]",
+        profile.witness_rows,
+        profile.const_rows,
+        profile.public_rows,
+        profile.alu_rows,
+        format_named_counts(&profile.non_primitive_rows)
+    );
+}
+
+fn format_named_counts(counts: &[tfheprus_prover::NamedCount]) -> String {
+    counts
+        .iter()
+        .map(|entry| format!("{}:{}", entry.name, entry.count))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_usize_list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn profile_sha3_commit_demo(field_count: usize) -> Result<(), Box<dyn Error>> {
     if field_count == 0 {
         return Err("field_count must be nonzero".into());
@@ -3592,7 +3758,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-leaf-cost [toy|moderate|paper-v1] [chunk_steps] [shape|prove]|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
     );
 }
 
@@ -3666,6 +3832,16 @@ fn parse_optional_total_step_count_arg(args: &[String]) -> Result<Option<usize>,
                 return Err("total step count must be nonzero".into());
             }
             Ok(Some(parsed))
+        }
+    }
+}
+
+fn parse_profile_leaf_mode_arg(args: &[String]) -> Result<bool, Box<dyn Error>> {
+    match args.get(4).map(String::as_str) {
+        None | Some("shape") | Some("estimate") => Ok(false),
+        Some("prove") | Some("proved") => Ok(true),
+        Some(other) => {
+            Err(format!("unknown leaf profile mode: {other}; use shape or prove").into())
         }
     }
 }
