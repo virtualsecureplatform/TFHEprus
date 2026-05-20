@@ -339,6 +339,50 @@ impl ActualPbsChainChunkBaseProver {
     }
 }
 
+pub struct ActualPbsChainChunkPrivateCompactRecursiveProver {
+    base: ActualPbsChainChunkBaseProver,
+    recursion: Option<recursive::PrivateCompactLeafRecursionProver>,
+}
+
+impl ActualPbsChainChunkPrivateCompactRecursiveProver {
+    pub fn new(params: &Params, step_count: usize) -> Result<Self, ProofError> {
+        Ok(Self {
+            base: ActualPbsChainChunkBaseProver::new(params, step_count)?,
+            recursion: None,
+        })
+    }
+
+    pub fn prove(
+        &mut self,
+        instance: &ActualPbsChainChunkInstance,
+    ) -> Result<CompactRecursiveActualPbsChainChunkProof, ProofError> {
+        let base = self.base.prove(instance)?;
+        let statement = base.public_statement();
+        let chain_summary = CompactActualPbsChainSummary::from_chunk_statement(&statement)?;
+        let summary_values = chain_summary.field_values();
+        if self.recursion.is_none() {
+            self.recursion = Some(recursive::PrivateCompactLeafRecursionProver::new(
+                &base.proof,
+                &summary_values,
+                chain_summary_header_len(),
+                &chain_summary_layout(&chain_summary.params),
+                &compact_chain_summary_layout(),
+            )?);
+        }
+        let recursion = self
+            .recursion
+            .as_ref()
+            .expect("cached recursive prover was initialized")
+            .prove(&base.proof, &summary_values)?;
+
+        Ok(CompactRecursiveActualPbsChainChunkProof {
+            base,
+            recursion,
+            chain_summary,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActualPbsChainChunkStatement {
     pub params: Params,

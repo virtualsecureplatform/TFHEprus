@@ -47,7 +47,6 @@ use tfheprus_prover::{
     prove_private_aggregated_recursive_actual_pbs_chain_chunk_tree,
     prove_private_aggregated_recursive_actual_pbs_chain_node_pair,
     prove_private_compact_aggregated_recursive_actual_pbs_chain_node_pair,
-    prove_private_compact_recursive_actual_pbs_chain_chunk_from_base,
     prove_private_recursive_actual_pbs_chain_chunk, prove_recursive_actual_pbs_chain_chunk,
     prove_sample_extract, serialize_aggregated_recursive_actual_pbs_chain_frontier_proof,
     serialize_aggregated_recursive_actual_pbs_chain_node_proof,
@@ -69,11 +68,11 @@ use tfheprus_prover::{
     verify_private_compact_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_private_recursive_actual_pbs_chain_chunk_statement_proof,
     verify_recursive_actual_pbs_chain_chunk_statement_proof, verify_sample_extract_proof,
-    ActualPbsChainChunkBaseProver, ActualPbsChainChunkStatement, ActualPbsChainSummary,
-    AggregatedRecursiveActualPbsChainNodeProof, CompactActualPbsChainSummary,
-    CompactAggregatedRecursiveActualPbsChainNodeProof, CompactRecursiveActualPbsChainChunkProof,
-    CompactRecursiveActualPbsChainNode, RecursiveActualPbsChainChunkProof,
-    RecursiveActualPbsChainNode, RecursiveProofSizeBreakdown,
+    ActualPbsChainChunkPrivateCompactRecursiveProver, ActualPbsChainChunkStatement,
+    ActualPbsChainSummary, AggregatedRecursiveActualPbsChainNodeProof,
+    CompactActualPbsChainSummary, CompactAggregatedRecursiveActualPbsChainNodeProof,
+    CompactRecursiveActualPbsChainChunkProof, CompactRecursiveActualPbsChainNode,
+    RecursiveActualPbsChainChunkProof, RecursiveActualPbsChainNode, RecursiveProofSizeBreakdown,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1716,7 +1715,7 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
     let mut max_base_private_inputs = 0usize;
     let mut max_recursive_public_inputs = 0usize;
     let mut total_artifact_bytes = 0usize;
-    let mut cached_base_prover: Option<ActualPbsChainChunkBaseProver> = None;
+    let mut cached_prover: Option<ActualPbsChainChunkPrivateCompactRecursiveProver> = None;
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
@@ -1762,17 +1761,16 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
             (proof, bytes.len(), "reused", Duration::ZERO, verify_time)
         } else {
             let prove_started = Instant::now();
-            if cached_base_prover.is_none() {
-                cached_base_prover = Some(ActualPbsChainChunkBaseProver::new(
+            if cached_prover.is_none() {
+                cached_prover = Some(ActualPbsChainChunkPrivateCompactRecursiveProver::new(
                     &params,
                     chunk_step_count,
                 )?);
             }
-            let base = cached_base_prover
-                .as_ref()
-                .expect("cached base prover was initialized")
+            let proof = cached_prover
+                .as_mut()
+                .expect("cached compact prover was initialized")
                 .prove(&instance)?;
-            let proof = prove_private_compact_recursive_actual_pbs_chain_chunk_from_base(base)?;
             let prove_time = prove_started.elapsed();
             let verify_time = if verify_leaf_artifacts {
                 let verify_started = Instant::now();
