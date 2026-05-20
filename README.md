@@ -346,6 +346,11 @@ A two-leaf cached paper-v1 smoke run
 `prove_us=12819439` for the second steady-state leaf. Extrapolated over 91
 same-shaped leaves this is roughly 1172 seconds before aggregation, compared
 with the previously recorded 2621-second leaf total.
+Leaf checkpoint commands now accept a final partial chunk, so `paper-v1 16 46`
+covers all 728 steps as 45 full 16-step leaves plus one 8-step tail. A
+two-leaf `paper-v1 16 2` smoke run reported `prove_us=30410937` for the first
+leaf and `prove_us=19847131` for the second steady-state leaf, making the
+16-step schedule the better target for the next full benchmark.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.

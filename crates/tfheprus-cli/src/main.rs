@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -1147,16 +1148,20 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
     if chunk_count < 2 {
         return Err("chunk count must be at least 2".into());
     }
-    let total_steps = chunk_step_count
-        .checked_mul(chunk_count)
-        .ok_or("chunk_steps * chunk_count overflowed")?;
-    if total_steps == 0 || total_steps > params.lwe_dimension {
+    let last_chunk_start = chunk_step_count
+        .checked_mul(chunk_count - 1)
+        .ok_or("(chunk_count - 1) * chunk_steps overflowed")?;
+    if last_chunk_start >= params.lwe_dimension {
         return Err(format!(
-            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            "chunk schedule must start the last chunk before params_n={}",
             params.lwe_dimension
         )
         .into());
     }
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?
+        .min(params.lwe_dimension);
 
     let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
     let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
@@ -1175,7 +1180,7 @@ fn prove_pbs_chain_tree_aggregate_recursive_demo(
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
-        let chunk_end = chunk_start + chunk_step_count;
+        let chunk_end = (chunk_start + chunk_step_count).min(params.lwe_dimension);
         let instance = ActualPbsChainChunkInstance::new(
             params.clone(),
             input.mask[chunk_start..chunk_end].to_vec(),
@@ -1297,16 +1302,20 @@ fn prove_pbs_chain_private_tree_aggregate_recursive_demo(
     if chunk_count < 2 {
         return Err("chunk count must be at least 2".into());
     }
-    let total_steps = chunk_step_count
-        .checked_mul(chunk_count)
-        .ok_or("chunk_steps * chunk_count overflowed")?;
-    if total_steps == 0 || total_steps > params.lwe_dimension {
+    let last_chunk_start = chunk_step_count
+        .checked_mul(chunk_count - 1)
+        .ok_or("(chunk_count - 1) * chunk_steps overflowed")?;
+    if last_chunk_start >= params.lwe_dimension {
         return Err(format!(
-            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            "chunk schedule must start the last chunk before params_n={}",
             params.lwe_dimension
         )
         .into());
     }
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?
+        .min(params.lwe_dimension);
 
     let (params, sk, evaluation_key, input, test_polynomial) = actual_pbs_materials(params);
     let body_exponent = tfheprus_core::mod_switch_to_exponent(&params, input.body);
@@ -1324,7 +1333,7 @@ fn prove_pbs_chain_private_tree_aggregate_recursive_demo(
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
-        let chunk_end = chunk_start + chunk_step_count;
+        let chunk_end = (chunk_start + chunk_step_count).min(params.lwe_dimension);
         let instance = ActualPbsChainChunkInstance::new(
             params.clone(),
             input.mask[chunk_start..chunk_end].to_vec(),
@@ -1505,16 +1514,20 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
         return Err("chunk count must be at least 2".into());
     }
     let params = preset.params();
-    let total_steps = chunk_step_count
-        .checked_mul(chunk_count)
-        .ok_or("chunk_steps * chunk_count overflowed")?;
-    if total_steps == 0 || total_steps > params.lwe_dimension {
+    let last_chunk_start = chunk_step_count
+        .checked_mul(chunk_count - 1)
+        .ok_or("(chunk_count - 1) * chunk_steps overflowed")?;
+    if last_chunk_start >= params.lwe_dimension {
         return Err(format!(
-            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            "chunk schedule must start the last chunk before params_n={}",
             params.lwe_dimension
         )
         .into());
     }
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?
+        .min(params.lwe_dimension);
 
     fs::create_dir_all(output_dir)?;
     let output_dir = Path::new(output_dir);
@@ -1537,7 +1550,7 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
-        let chunk_end = chunk_start + chunk_step_count;
+        let chunk_end = (chunk_start + chunk_step_count).min(params.lwe_dimension);
         let instance = ActualPbsChainChunkInstance::new(
             params.clone(),
             input.mask[chunk_start..chunk_end].to_vec(),
@@ -1686,16 +1699,20 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
         return Err("chunk count must be at least 2".into());
     }
     let params = preset.params();
-    let total_steps = chunk_step_count
-        .checked_mul(chunk_count)
-        .ok_or("chunk_steps * chunk_count overflowed")?;
-    if total_steps == 0 || total_steps > params.lwe_dimension {
+    let last_chunk_start = chunk_step_count
+        .checked_mul(chunk_count - 1)
+        .ok_or("(chunk_count - 1) * chunk_steps overflowed")?;
+    if last_chunk_start >= params.lwe_dimension {
         return Err(format!(
-            "chunk_steps * chunk_count must be in 1..={} for this preset",
+            "chunk schedule must start the last chunk before params_n={}",
             params.lwe_dimension
         )
         .into());
     }
+    let total_steps = chunk_step_count
+        .checked_mul(chunk_count)
+        .ok_or("chunk_steps * chunk_count overflowed")?
+        .min(params.lwe_dimension);
 
     fs::create_dir_all(output_dir)?;
     let output_dir = Path::new(output_dir);
@@ -1715,11 +1732,13 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
     let mut max_base_private_inputs = 0usize;
     let mut max_recursive_public_inputs = 0usize;
     let mut total_artifact_bytes = 0usize;
-    let mut cached_prover: Option<ActualPbsChainChunkPrivateCompactRecursiveProver> = None;
+    let mut cached_provers =
+        BTreeMap::<usize, ActualPbsChainChunkPrivateCompactRecursiveProver>::new();
 
     for chunk_index in 0..chunk_count {
         let chunk_start = chunk_index * chunk_step_count;
-        let chunk_end = chunk_start + chunk_step_count;
+        let chunk_end = (chunk_start + chunk_step_count).min(params.lwe_dimension);
+        let actual_chunk_steps = chunk_end - chunk_start;
         let instance = ActualPbsChainChunkInstance::new(
             params.clone(),
             input.mask[chunk_start..chunk_end].to_vec(),
@@ -1761,15 +1780,18 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
             (proof, bytes.len(), "reused", Duration::ZERO, verify_time)
         } else {
             let prove_started = Instant::now();
-            if cached_prover.is_none() {
-                cached_prover = Some(ActualPbsChainChunkPrivateCompactRecursiveProver::new(
-                    &params,
-                    chunk_step_count,
-                )?);
+            if !cached_provers.contains_key(&actual_chunk_steps) {
+                cached_provers.insert(
+                    actual_chunk_steps,
+                    ActualPbsChainChunkPrivateCompactRecursiveProver::new(
+                        &params,
+                        actual_chunk_steps,
+                    )?,
+                );
             }
-            let proof = cached_prover
-                .as_mut()
-                .expect("cached compact prover was initialized")
+            let proof = cached_provers
+                .get_mut(&actual_chunk_steps)
+                .expect("cached compact prover was initialized for this chunk size")
                 .prove(&instance)?;
             let prove_time = prove_started.elapsed();
             let verify_time = if verify_leaf_artifacts {
