@@ -2844,17 +2844,31 @@ fn bench_pbs_chain_private_recursive_demo(
     let root_path = mode_dir.join("root.bin");
     let mode_dir = path_to_string(mode_dir)?;
     let root_path = path_to_string(root_path)?;
-    let total_steps = chunk_step_count
+    let params = preset.params();
+    let requested_steps = chunk_step_count
         .checked_mul(chunk_count)
         .ok_or("chunk_steps * chunk_count overflowed")?;
+    let last_chunk_start = chunk_step_count
+        .checked_mul(chunk_count - 1)
+        .ok_or("(chunk_count - 1) * chunk_steps overflowed")?;
+    if last_chunk_start >= params.lwe_dimension {
+        return Err(format!(
+            "last chunk starts at step {last_chunk_start}, but preset {} has only {} blind-rotation steps",
+            preset.name(),
+            params.lwe_dimension
+        )
+        .into());
+    }
+    let total_steps = requested_steps.min(params.lwe_dimension);
     let started = Instant::now();
     println!(
-        "pbs-chain private benchmark start: mode={}, preset={}, chunk_steps={}, chunk_count={}, total_steps={}, artifact_dir={}, rayon_num_threads={}, rustflags={}",
+        "pbs-chain private benchmark start: mode={}, preset={}, chunk_steps={}, chunk_count={}, total_steps={}, requested_steps={}, artifact_dir={}, rayon_num_threads={}, rustflags={}",
         mode,
         preset.name(),
         chunk_step_count,
         chunk_count,
         total_steps,
+        requested_steps,
         mode_dir,
         env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "unset".to_string()),
         env::var("RUSTFLAGS").unwrap_or_else(|_| "unset".to_string())

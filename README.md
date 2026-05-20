@@ -318,17 +318,18 @@ layer-3 proofs into an 82,002,970-byte artifact, and
 Current paper-style PBS IVC PoC: the compact-private recursive path proves
 leaves and aggregates with summary-only public inputs, and the PBS BSK/mask
 chain uses Plonky3-friendly Goldilocks Poseidon2 rather than SHA3. A fresh
-post-switch run of `bench-pbs-chain-private-compact paper-v1 8 91` with
-`RAYON_NUM_THREADS=16` proved all 728 paper-v1 blind-rotation steps, matched
-the native NTT PBS output with
-`full_compact_leaf_checkpoint_output_message=3`, aggregated 91 leaves through
-90 compact recursive aggregate nodes, serialized
-`target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin`,
+post-NTT-accumulation run of
+`bench-pbs-chain-private-compact paper-v1 16 46` with `RAYON_NUM_THREADS=16`
+proved all 728 paper-v1 blind-rotation steps as 45 full 16-step leaves plus
+one 8-step tail, matched the native NTT PBS output with
+`full_compact_leaf_checkpoint_output_message=3`, aggregated 46 leaves through
+45 compact recursive aggregate nodes, serialized
+`target/pbs-checkpoints-paper-v1-private-compact-nttacc-c16/compact/root.bin`,
 and verified the root artifact with `params_n=728`, `total_steps=728`,
-`root_public_inputs=31`, `compact_summary_fields=31`, and `verify_us=3461`.
-The run reported `total_prove_us=2621614911`, `aggregate_us=156483219`,
-`total_us=2787146162`, `leaf_artifact_bytes=165374478`,
-`aggregate_artifact_bytes=16124512`, and `root_artifact_bytes=179105`.
+`root_public_inputs=31`, `compact_summary_fields=31`, and `verify_us=3446`.
+The run reported `total_us=1023183370`, leaf `total_prove_us=935140075`,
+`aggregate_us=78855821`, `leaf_artifact_bytes=82194321`,
+`aggregate_artifact_bytes=8062932`, and `root_artifact_bytes=178988`.
 The leaf-cost profiler is available for the next optimization pass:
 `profile-pbs-chain-leaf-cost paper-v1 8 shape` reports an 8-step leaf with
 `total_ops=2760852`, `witness_count=2840740`, `private_inputs=229896`,
@@ -349,8 +350,9 @@ with the previously recorded 2621-second leaf total.
 Leaf checkpoint commands now accept a final partial chunk, so `paper-v1 16 46`
 covers all 728 steps as 45 full 16-step leaves plus one 8-step tail. A
 two-leaf `paper-v1 16 2` smoke run reported `prove_us=30410937` for the first
-leaf and `prove_us=19847131` for the second steady-state leaf, making the
-16-step schedule the better target for the next full benchmark.
+leaf and `prove_us=19847131` for the second steady-state leaf. The full c16
+run above keeps the steady full-leaf cost near 20 seconds and the partial tail
+at `prove_us=18582700`.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.
@@ -367,7 +369,7 @@ reduced public inputs to `2781`, but increased proof size to
 `1271582` bytes and was slower in this run (`prove_us=658246`), so the faster
 combined path currently keeps the KSK public. The combined command
 `prove-compact-root-keyswitch
-target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin`
+target/pbs-checkpoints-paper-v1-private-compact-nttacc-c16/compact/root.bin`
 verifies the compact recursive root, checks the key-switch input accumulator
 against the root output-accumulator digest, proves and verifies the final GLWE
 key switch, and decrypts the final ciphertext under the original input LWE key
@@ -377,17 +379,17 @@ with `key_switch_prove_us=674661`, `key_switch_verify_us=21813`, and
 The one-artifact recursive PBS-plus-key-switch path is:
 `cargo run --release -p tfheprus-cli --
 prove-compact-root-keyswitch-recursive
-target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root.bin
-target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root-keyswitch-final.bin`,
+target/pbs-checkpoints-paper-v1-private-compact-nttacc-c16/compact/root.bin
+target/pbs-checkpoints-paper-v1-private-compact-nttacc-c16/compact/root-keyswitch-final.bin`,
 followed by `cargo run --release -p tfheprus-cli --
 verify-compact-root-keyswitch-recursive
-target/pbs-checkpoints-paper-v1-private-compact-cbd-c8/compact/root-keyswitch-final.bin`.
+target/pbs-checkpoints-paper-v1-private-compact-nttacc-c16/compact/root-keyswitch-final.bin`.
 This final recursive proof privately verifies the compact PBS root proof and the
 GLWE key-switch proof, links the key-switch input accumulator digest to the PBS
 root output digest in-circuit, and exposes only the compact PBS summary plus the
-final output LWE fields. On the current runner it wrote a 228404-byte artifact
-with `final_public_inputs=760`, `recursive_prove_us=11001820`,
-`recursive_verify_us=4202`, standalone artifact `verify_us=6034`, and
+final output LWE fields. On the current runner it wrote a 228437-byte artifact
+with `final_public_inputs=760`, `recursive_prove_us=9753048`,
+`recursive_verify_us=4201`, standalone artifact `verify_us=6087`, and
 `keyswitched_output_message=3`. Regenerate compact root artifacts after changes
 to the default encryption material, because the root digest binds the exact
 noisy ciphertext values.
