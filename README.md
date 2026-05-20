@@ -339,6 +339,12 @@ with `build_us=1620799`, `air_prep_us=789986`, `prover_data_us=5271495`,
 `witness_run_us=293074`, `prove_us=13634420`, and `verify_us=26709`. Since
 paper-v1 uses 91 same-shaped leaves, the compact recursive leaf batch path now
 caches the base leaf circuit/prover data and reuses it for newly written leaves.
+A two-leaf cached paper-v1 smoke run
+`prove-pbs-chain-private-leaves-compact-fast paper-v1 8 2` reported
+`prove_us=29078309` for the first leaf, including one-time base prover setup,
+and `prove_us=20997514` for the second steady-state leaf. Extrapolated over 91
+same-shaped leaves this is roughly 1919 seconds before aggregation, compared
+with the previously recorded 2621-second leaf total.
 The recursive STARK configs use capped Merkle commitments
 (`MERKLE_CAP_HEIGHT=2`), including a zero-depth capped MMCS verifier regression
 test for the case where the cap covers the whole opening path.
