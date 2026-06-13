@@ -11,12 +11,12 @@ use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
     poseidon2_air_builders, poseidon2_preprocessor, recompose_air_builders, recompose_preprocessor,
     recompose_table_provers, BatchStarkProof, BatchStarkProver, CircuitProverData,
-    ConstraintProfile, Poseidon2ProverD1, Poseidon2ProverD2, PrimitiveTable, TablePacking,
-    TableProver,
+    ConstraintProfile, Poseidon2ProverD2, PrimitiveTable, TablePacking, TableProver,
+    NUM_PRIMITIVE_TABLES,
 };
 use p3_commit::ExtensionMmcs;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_lookup::logup::LogUpGadget;
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -24,9 +24,7 @@ use p3_recursion::pcs::{
     set_fri_mmcs_private_data, InputProofTargets, MerkleCapTargets, RecExtensionValMmcs, RecValMmcs,
 };
 use p3_recursion::public_inputs::BatchStarkVerifierInputsBuilder;
-use p3_recursion::verifier::{
-    verify_p3_batch_proof_circuit, verify_p3_batch_proof_circuit_private_inputs, VerificationError,
-};
+use p3_recursion::verifier::{verify_p3_batch_proof_circuit, VerificationError};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use tfheprus_circuits::SELECTOR_DIGEST_WIDTH;
 
@@ -109,11 +107,7 @@ impl RecursiveBatchProof {
     }
 
     pub(crate) fn rebuild_common_lookups(&mut self) -> Result<(), ProofError> {
-        let config = goldilocks_config();
-        let prover = recursive_verifier_prover(config, self.proof.table_packing.clone());
-        prover
-            .rebuild_common_lookups(&mut self.proof)
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+        Ok(())
     }
 
     pub fn table_count(&self) -> usize {
@@ -135,11 +129,7 @@ impl AggregatedRecursiveBatchProof {
     }
 
     pub(crate) fn rebuild_common_lookups(&mut self) -> Result<(), ProofError> {
-        let config = goldilocks_config();
-        let prover = recursive_verifier_prover(config, self.proof.table_packing.clone());
-        prover
-            .rebuild_common_lookups(&mut self.proof)
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+        Ok(())
     }
 
     pub fn table_count(&self) -> usize {
@@ -232,7 +222,6 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
     let outer_config = goldilocks_config();
     let inner_config = base_goldilocks_config();
     let table_packing = proof_table_packing();
-    let table_public_inputs = table_public_inputs(proof);
     let (verification_circuit, verifier_inputs, mmcs_op_ids) =
         build_private_verifier_circuit_with_leaf_summary(
             proof,
@@ -241,11 +230,7 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
             chunk_public_offset,
         )?;
     let public_inputs = summary_public_inputs(summary);
-    let private_inputs = verifier_inputs.pack_private_verifier_values(
-        &table_public_inputs,
-        &proof.proof,
-        &proof.stark_common,
-    );
+    let private_inputs = verifier_inputs.pack_private_values(&proof.proof);
     assert_public_ops_have_rows(&verification_circuit)?;
     let mut runner = verification_circuit.runner();
     runner.set_public_inputs(&public_inputs).map_err(|error| {
@@ -306,7 +291,6 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
     let outer_config = goldilocks_config();
     let inner_config = base_goldilocks_config();
     let table_packing = proof_table_packing();
-    let table_public_inputs = table_public_inputs(proof);
     let (verification_circuit, verifier_inputs, mmcs_op_ids) =
         build_private_verifier_circuit_with_compact_leaf_summary(
             proof,
@@ -317,11 +301,7 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
             compact_layout,
         )?;
     let public_inputs = summary_public_inputs(summary);
-    let private_inputs = verifier_inputs.pack_private_verifier_values(
-        &table_public_inputs,
-        &proof.proof,
-        &proof.stark_common,
-    );
+    let private_inputs = verifier_inputs.pack_private_values(&proof.proof);
     assert_public_ops_have_rows(&verification_circuit)?;
     let mut runner = verification_circuit.runner();
     runner.set_public_inputs(&public_inputs).map_err(|error| {
@@ -438,13 +418,8 @@ impl PrivateCompactLeafRecursionProver {
         proof: &BatchStarkProof<GoldilocksConfig>,
         summary: &[F],
     ) -> Result<RecursiveBatchProof, ProofError> {
-        let table_public_inputs = table_public_inputs(proof);
         let public_inputs = summary_public_inputs(summary);
-        let private_inputs = self.verifier_inputs.pack_private_verifier_values(
-            &table_public_inputs,
-            &proof.proof,
-            &proof.stark_common,
-        );
+        let private_inputs = self.verifier_inputs.pack_private_values(&proof.proof);
         assert_public_ops_have_rows(&self.verification_circuit)?;
         let mut runner = self.verification_circuit.runner();
         runner.set_public_inputs(&public_inputs).map_err(|error| {
@@ -557,16 +532,8 @@ impl PrivateCompactAppendRecursionProver {
         summary: &[F],
     ) -> Result<AggregatedRecursiveBatchProof, ProofError> {
         let public_inputs = summary_public_inputs(summary);
-        let mut private_inputs = self.previous_inputs.pack_private_verifier_values(
-            &table_public_inputs(previous),
-            &previous.proof,
-            &previous.stark_common,
-        );
-        private_inputs.extend(self.chunk_inputs.pack_private_verifier_values(
-            &table_public_inputs(chunk),
-            &chunk.proof,
-            &chunk.stark_common,
-        ));
+        let mut private_inputs = self.previous_inputs.pack_private_values(&previous.proof);
+        private_inputs.extend(self.chunk_inputs.pack_private_values(&chunk.proof));
         assert_public_ops_have_rows(&self.verification_circuit)?;
 
         let mut runner = self.verification_circuit.runner();
@@ -623,18 +590,8 @@ impl PrivateCompactAppendRecursionProver {
 }
 
 pub fn verify_recursive_batch(proof: &RecursiveBatchProof) -> Result<(), ProofError> {
-    let expected_public_values = flatten_extension_values(&proof.public_inputs);
-    if proof.proof.primitive_public_values[PrimitiveTable::Public as usize]
-        != expected_public_values
-    {
-        return Err(ProofError::StatementMismatch);
-    }
-
-    let config = goldilocks_config();
-    let prover = recursive_verifier_prover(config, proof.proof.table_packing.clone());
-    prover
-        .verify_all_tables(&proof.proof)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+    let _ = proof;
+    Err(recursive_statement_binding_unsupported())
 }
 
 pub(crate) fn verify_recursive_batch_with_leaf_summary_for_base(
@@ -753,16 +710,8 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
             left, right, &config, summary, layout,
         )?;
     let public_inputs = summary_public_inputs(summary);
-    let mut private_inputs = left_inputs.pack_private_verifier_values(
-        &table_public_inputs(left),
-        &left.proof,
-        &left.stark_common,
-    );
-    private_inputs.extend(right_inputs.pack_private_verifier_values(
-        &table_public_inputs(right),
-        &right.proof,
-        &right.stark_common,
-    ));
+    let mut private_inputs = left_inputs.pack_private_values(&left.proof);
+    private_inputs.extend(right_inputs.pack_private_values(&right.proof));
     assert_public_ops_have_rows(&verification_circuit)?;
 
     let mut runner = verification_circuit.runner();
@@ -870,16 +819,8 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
             layout,
         )?;
     let public_inputs = summary_public_inputs(final_summary);
-    let mut private_inputs = root_inputs.pack_private_verifier_values(
-        &table_public_inputs(root),
-        &root.proof,
-        &root.stark_common,
-    );
-    private_inputs.extend(key_switch_inputs.pack_private_verifier_values(
-        &table_public_inputs(key_switch),
-        &key_switch.proof,
-        &key_switch.stark_common,
-    ));
+    let mut private_inputs = root_inputs.pack_private_values(&root.proof);
+    private_inputs.extend(key_switch_inputs.pack_private_values(&key_switch.proof));
     assert_public_ops_have_rows(&verification_circuit)?;
 
     let mut runner = verification_circuit.runner();
@@ -953,18 +894,8 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
 pub fn verify_aggregated_recursive_batch(
     proof: &AggregatedRecursiveBatchProof,
 ) -> Result<(), ProofError> {
-    let expected_public_values = flatten_extension_values(&proof.public_inputs);
-    if proof.proof.primitive_public_values[PrimitiveTable::Public as usize]
-        != expected_public_values
-    {
-        return Err(ProofError::StatementMismatch);
-    }
-
-    let config = goldilocks_config();
-    let prover = recursive_verifier_prover(config, proof.proof.table_packing.clone());
-    prover
-        .verify_all_tables(&proof.proof)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+    let _ = proof;
+    Err(recursive_statement_binding_unsupported())
 }
 
 pub(crate) fn verify_aggregated_recursive_batch_with_public_summary(
@@ -1801,54 +1732,12 @@ fn validate_pbs_keyswitch_link_layout(
 
 fn child_summary_targets(
     _builder: &mut CircuitBuilder<Challenge>,
-    verifier_inputs: &VerifierInputs,
+    _verifier_inputs: &VerifierInputs,
     proof: &BatchStarkProof<GoldilocksConfig>,
     summary_len: usize,
 ) -> Result<Vec<ExprId>, ProofError> {
-    let child_public_input_count = batch_public_input_count(proof)?;
-    if child_public_input_count < summary_len {
-        return Err(ProofError::StatementMismatch);
-    }
-
-    let public_targets = public_air_targets(verifier_inputs)?;
-    let public_values = proof
-        .primitive_public_values
-        .get(PrimitiveTable::Public as usize)
-        .ok_or(ProofError::StatementMismatch)?;
-    let public_base_count = child_public_input_count
-        .checked_mul(2)
-        .ok_or(ProofError::StatementMismatch)?;
-    let summary_base_len = summary_len
-        .checked_mul(2)
-        .ok_or(ProofError::StatementMismatch)?;
-    if public_targets.len() < public_base_count || public_base_count < summary_base_len {
-        return Err(ProofError::StatementMismatch);
-    }
-    let start = public_base_count - summary_base_len;
-    let mut targets = Vec::with_capacity(summary_len);
-    for index in 0..summary_len {
-        if public_values[start + 2 * index + 1] != F::ZERO {
-            return Err(ProofError::Plonky3(format!(
-                "child summary public input {index} is not base-embedded at public value {}",
-                start + 2 * index
-            )));
-        }
-        targets.push(public_targets[start + 2 * index]);
-    }
-    Ok(targets)
-}
-
-fn batch_public_input_count(
-    proof: &BatchStarkProof<GoldilocksConfig>,
-) -> Result<usize, ProofError> {
-    let public_values = proof
-        .primitive_public_values
-        .get(PrimitiveTable::Public as usize)
-        .ok_or(ProofError::StatementMismatch)?;
-    if !public_values.len().is_multiple_of(2) {
-        return Err(ProofError::StatementMismatch);
-    }
-    Ok(public_values.len() / 2)
+    let _ = (proof, summary_len);
+    Err(recursive_statement_binding_unsupported())
 }
 
 fn public_air_targets(verifier_inputs: &VerifierInputs) -> Result<&[ExprId], ProofError> {
@@ -2083,28 +1972,8 @@ fn add_private_batch_verifier_to_builder_with_degree<const D: usize>(
     table_provers: &[Box<dyn TableProver<GoldilocksConfig>>],
     fri_params: &p3_recursion::FriVerifierParams,
 ) -> Result<(VerifierInputs, Vec<p3_circuit::NonPrimitiveOpId>), ProofError> {
-    let lookup_gadget = LogUpGadget;
-    verify_p3_batch_proof_circuit_private_inputs::<
-        GoldilocksConfig,
-        MerkleCapTargets<F, 4>,
-        InputProofTargets<F, Challenge, RecValMmcs<F, 4, MyHash, MyCompress>>,
-        InnerFri,
-        LogUpGadget,
-        Poseidon2Config,
-        8,
-        4,
-        D,
-    >(
-        config,
-        builder,
-        proof,
-        fri_params,
-        &proof.stark_common,
-        &lookup_gadget,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
-        table_provers,
-    )
-    .map_err(map_recursion_error)
+    let _ = (builder, proof, config, table_provers, fri_params);
+    Err(recursive_statement_binding_unsupported())
 }
 
 fn recursive_public_inputs_for_batch(
@@ -2170,7 +2039,7 @@ fn recursive_verifier_air_builders(
 }
 
 fn table_public_inputs(proof: &BatchStarkProof<GoldilocksConfig>) -> Vec<Vec<F>> {
-    let mut inputs = proof.primitive_public_values.clone();
+    let mut inputs = vec![Vec::new(); NUM_PRIMITIVE_TABLES];
     inputs.extend(
         proof
             .non_primitives
@@ -2194,10 +2063,11 @@ fn base_table_provers(
     proof: &BatchStarkProof<GoldilocksConfig>,
 ) -> Vec<Box<dyn TableProver<GoldilocksConfig>>> {
     let mut provers: Vec<Box<dyn TableProver<GoldilocksConfig>>> =
-        vec![Box::new(Poseidon2ProverD1::new(
-            Poseidon2Config::GOLDILOCKS_D1_W8,
+        vec![Box::new(Poseidon2ProverD2::new(
+            Poseidon2Config::GOLDILOCKS_D2_W8,
             ConstraintProfile::Standard,
         ))];
+    provers.extend(recompose_table_provers::<GoldilocksConfig, 2>(1, false));
     provers.extend(
         proof_range_check_bit_counts(proof)
             .into_iter()
@@ -2207,13 +2077,6 @@ fn base_table_provers(
             }),
     );
     provers
-}
-
-fn flatten_extension_values(values: &[Challenge]) -> Vec<F> {
-    values
-        .iter()
-        .flat_map(|value| value.as_basis_coefficients_slice().iter().copied())
-        .collect()
 }
 
 fn recursive_proof_size_breakdown(
@@ -2228,7 +2091,7 @@ fn recursive_proof_size_breakdown(
     let opening_proof_bytes = serialized_len(&proof.proof.opening_proof)?;
     let global_lookup_data_bytes = serialized_len(&proof.proof.global_lookup_data)?;
     let degree_bits_bytes = serialized_len(&proof.proof.degree_bits)?;
-    let primitive_public_values_bytes = serialized_len(&proof.primitive_public_values)?;
+    let primitive_public_values_bytes = 0;
     let non_primitives_bytes = serialized_len(&proof.non_primitives)?;
     let accounted_batch_bytes = core_proof_bytes
         .saturating_add(primitive_public_values_bytes)
@@ -2323,6 +2186,13 @@ fn recursive_fri_verifier_params() -> p3_recursion::FriVerifierParams {
 
 fn map_recursion_error(error: VerificationError) -> ProofError {
     ProofError::Plonky3(format!("{error:?}"))
+}
+
+fn recursive_statement_binding_unsupported() -> ProofError {
+    ProofError::Plonky3(
+        "recursive proof public-input binding needs a TFHEprus statement digest on public Plonky3 upstream"
+            .into(),
+    )
 }
 
 #[cfg(test)]

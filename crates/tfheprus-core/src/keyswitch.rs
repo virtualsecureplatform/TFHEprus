@@ -1,7 +1,9 @@
 use rand::RngCore;
 
 use crate::field::Goldilocks;
-use crate::glev::{GlevCiphertext, GlevCiphertextNtt};
+use crate::glev::{
+    decompose_scalar, decomposition_gadget_factor, GlevCiphertext, GlevCiphertextNtt,
+};
 use crate::glwe::{GlweCiphertext, GlweSecretKey};
 use crate::lwe::{LweCiphertext, LweSecretKey};
 use crate::params::Params;
@@ -15,6 +17,11 @@ pub struct GlweKeySwitchKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlweKeySwitchKeyNtt {
     pub rows: Vec<GlevCiphertextNtt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LweKeySwitchKey {
+    pub rows: Vec<Vec<LweCiphertext>>,
 }
 
 impl GlweKeySwitchKey {
@@ -62,6 +69,66 @@ impl GlweKeySwitchKey {
     }
 }
 
+impl LweKeySwitchKey {
+    pub fn generate<R: RngCore + ?Sized>(
+        params: &Params,
+        source_key: &LweSecretKey,
+        target_key: &LweSecretKey,
+        rng: &mut R,
+    ) -> Self {
+        let rows = source_key
+            .coeffs()
+            .iter()
+            .map(|&source_coeff| {
+                (0..params.decomposition_level_count)
+                    .map(|level_index| {
+                        let gadget = decomposition_gadget_factor(params, level_index);
+                        let encoded = source_coeff * gadget;
+                        LweCiphertext::encrypt_encoded_with_params(params, target_key, encoded, rng)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { rows }
+    }
+
+    pub fn generate_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        source_key: &LweSecretKey,
+        target_key: &LweSecretKey,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let rows = source_key
+            .coeffs()
+            .iter()
+            .map(|&source_coeff| {
+                (0..params.decomposition_level_count)
+                    .map(|level_index| {
+                        let gadget = decomposition_gadget_factor(params, level_index);
+                        let encoded = source_coeff * gadget;
+                        LweCiphertext::encrypt_encoded_with_noise_bound(
+                            target_key,
+                            encoded,
+                            noise_bound,
+                            rng,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { rows }
+    }
+
+    pub fn target_dimension(&self) -> usize {
+        self.rows
+            .first()
+            .and_then(|row| row.first())
+            .map(|ct| ct.mask.len())
+            .expect("LWE key switch key must contain at least one row")
+    }
+}
+
 pub fn glwe_keyswitch(
     params: &Params,
     ksk: &GlweKeySwitchKey,
@@ -86,6 +153,24 @@ pub fn glwe_keyswitch_ntt(
     let mut output = GlweCiphertext::trivial(input.body.clone(), target_dimension);
     for (mask_poly, row) in input.mask.iter().zip(ksk.rows.iter()) {
         output = output.sub(&row.external_product_by_plain_poly(params, mask_poly));
+    }
+    output
+}
+
+pub fn lwe_keyswitch(
+    params: &Params,
+    ksk: &LweKeySwitchKey,
+    input: &LweCiphertext,
+) -> LweCiphertext {
+    assert_eq!(ksk.rows.len(), input.mask.len());
+    let target_dimension = ksk.target_dimension();
+    let mut output = LweCiphertext::trivial(target_dimension, input.body);
+    for (mask_value, row) in input.mask.iter().zip(ksk.rows.iter()) {
+        assert_eq!(row.len(), params.decomposition_level_count);
+        let digits = decompose_scalar(params, *mask_value);
+        for (digit, level_ct) in digits.iter().zip(row.iter()) {
+            output = output.sub(&level_ct.scale(*digit));
+        }
     }
     output
 }
@@ -166,6 +251,27 @@ mod tests {
             GlweCiphertext::encrypt_with_noise_bound(&params, &sk.glwe, &message, 0, &mut rng);
         let switched = glwe_keyswitch(&params, &ksk, &input);
         assert_eq!(switched.phase(&target_key), input.phase(&sk.glwe));
+    }
+
+    #[test]
+    fn lwe_keyswitch_preserves_boolean_phase_under_target_key() {
+        let params = Params::toy();
+        let mut rng = ChaCha20Rng::seed_from_u64(204);
+        let sk = SecretKey::generate(&params, &mut rng);
+        let source_key = sk.extracted_output_lwe_key();
+        let ksk = LweKeySwitchKey::generate_with_noise_bound(
+            &params,
+            &source_key,
+            &sk.input_lwe,
+            0,
+            &mut rng,
+        );
+        for message in [false, true] {
+            let input =
+                LweCiphertext::encrypt_bool_with_noise_bound(&source_key, message, 0, &mut rng);
+            let output = lwe_keyswitch(&params, &ksk, &input);
+            assert_eq!(output.decrypt_bool(&sk.input_lwe), message);
+        }
     }
 
     #[test]

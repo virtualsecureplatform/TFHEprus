@@ -22,6 +22,12 @@ enough to mirror in Plonky3 circuits.
 - LWE and GLWE encryption/decryption with centered-binomial noise by default
   (`centered_binomial_terms=32`). Exact/noise-zero constructors are kept only
   for trivial public ciphertexts and algebraic test fixtures.
+- `Params::secure_128()` for native ciphertext-security runs. This uses the
+  TFHE2048-shaped Goldilocks preset `n=2048, N=2048, k=1, B=2^9, l=4` with
+  discrete-Gaussian noise `stddev=2^14`. The larger noise keeps the
+  Goldilocks/binary-key estimate above 128 bits in the TFHEprus-specific
+  estimator entry:
+  `Parameter-Selection/python/estimates/TFHEprus_secure_128.py`.
 - GLev/GGSW structures for exact toy decomposition and native paper-style
   approximate decomposition (`B=2^5, l=4` in `Params::paper_v1()`).
 - External product and CMUX, with coefficient-key and NTT-key variants.
@@ -30,11 +36,16 @@ enough to mirror in Plonky3 circuits.
 - Sample extraction to an LWE ciphertext under the extracted GLWE key, plus a
   paper-style GLWE key switch whose target key makes the first `n` GLWE mask
   coefficients a ciphertext under the original input LWE key.
+- LWE identity key switching from the extracted GLWE LWE key back to the input
+  LWE key, plus native PBS+IKS Boolean `HomGate` helpers and an NTT-key NAND
+  smoke path.
 
 `bootstrap_without_keyswitch` deliberately exposes the pre-key-switch PBS
 output under `SecretKey::extracted_output_lwe_key()`. The native key-switch
-helpers can then switch the final accumulator to an extraction-compatible GLWE
-key derived from `SecretKey::input_lwe`.
+helpers can then either switch the final accumulator to an
+extraction-compatible GLWE key derived from `SecretKey::input_lwe`, or perform
+the TFHE-style LWE identity key switch used by `GateEvaluationKey` and
+`hom_gate_ntt`.
 
 ## Current Proof Coverage
 
@@ -131,6 +142,7 @@ cargo run -p tfheprus-cli -- profile-actual-pbs moderate
 cargo run -p tfheprus-cli -- run-actual-pbs-native moderate
 cargo run -p tfheprus-cli -- profile-actual-pbs paper-v1
 cargo run -p tfheprus-cli -- run-actual-pbs-native paper-v1
+cargo run -p tfheprus-cli -- run-hom-gate-native secure-128
 cargo run -p tfheprus-cli -- prove-actual-pbs
 ```
 
@@ -159,9 +171,16 @@ enabled by default; this preset is for measuring native and statement-size
 growth before attempting a much larger proof.
 
 `Params::paper_v1()` exposes the paper-shaped PBS preset
-`n=728, N=1024, k=1, B=2^5, l=4, p=4`. `profile-actual-pbs paper-v1` is a
-lightweight estimator, so it does not allocate the full key just to count
-wires. On the current runner it reports `bsk_public_inputs=11927552`,
+`n=728, N=1024, k=1, B=2^5, l=4, p=4`. This preset is not the 128-bit
+ciphertext-security target because it keeps the legacy CBD(32) noise over a
+Goldilocks-size modulus. Use `Params::secure_128()` / CLI preset `secure-128`
+for native HomGate runs that should follow the 128-bit TFHE2048 estimate shape
+with the local `stddev=2^14` margin; the TFHEprus-specific estimate script
+includes the actual binary input-key distribution as well as the ternary GLWE
+reference.
+`profile-actual-pbs paper-v1` is a lightweight estimator, so it does not
+allocate the full key just to count wires. On the current runner it reports
+`bsk_public_inputs=11927552`,
 `public_inputs=11930330`, `private_inputs=8992320`, and
 `private_inputs_per_coeff=6` for approximate decomposition digits plus
 error/sign witnesses. `run-actual-pbs-native paper-v1` skips the coefficient

@@ -3,6 +3,7 @@ use rand::RngCore;
 use crate::field::Goldilocks;
 use crate::ggsw::{GgswCiphertext, GgswCiphertextNtt};
 use crate::glwe::GlweSecretKey;
+use crate::keyswitch::LweKeySwitchKey;
 use crate::lwe::LweSecretKey;
 use crate::params::Params;
 
@@ -20,6 +21,18 @@ pub struct EvaluationKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvaluationKeyNtt {
     pub bootstrapping_key: Vec<GgswCiphertextNtt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateEvaluationKey {
+    pub bootstrapping_key: Vec<GgswCiphertext>,
+    pub key_switching_key: LweKeySwitchKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateEvaluationKeyNtt {
+    pub bootstrapping_key: Vec<GgswCiphertextNtt>,
+    pub key_switching_key: LweKeySwitchKey,
 }
 
 impl SecretKey {
@@ -92,6 +105,51 @@ impl EvaluationKey {
                 .iter()
                 .map(GgswCiphertext::to_ntt)
                 .collect(),
+        }
+    }
+}
+
+impl GateEvaluationKey {
+    pub fn generate<R: RngCore + ?Sized>(params: &Params, sk: &SecretKey, rng: &mut R) -> Self {
+        let bootstrapping_key = EvaluationKey::generate(params, sk, rng).bootstrapping_key;
+        let key_switching_key =
+            LweKeySwitchKey::generate(params, &sk.extracted_output_lwe_key(), &sk.input_lwe, rng);
+        Self {
+            bootstrapping_key,
+            key_switching_key,
+        }
+    }
+
+    pub fn generate_with_noise_bound<R: RngCore + ?Sized>(
+        params: &Params,
+        sk: &SecretKey,
+        noise_bound: u64,
+        rng: &mut R,
+    ) -> Self {
+        let bootstrapping_key =
+            EvaluationKey::generate_with_noise_bound(params, sk, noise_bound, rng)
+                .bootstrapping_key;
+        let key_switching_key = LweKeySwitchKey::generate_with_noise_bound(
+            params,
+            &sk.extracted_output_lwe_key(),
+            &sk.input_lwe,
+            noise_bound,
+            rng,
+        );
+        Self {
+            bootstrapping_key,
+            key_switching_key,
+        }
+    }
+
+    pub fn to_ntt(&self) -> GateEvaluationKeyNtt {
+        GateEvaluationKeyNtt {
+            bootstrapping_key: self
+                .bootstrapping_key
+                .iter()
+                .map(GgswCiphertext::to_ntt)
+                .collect(),
+            key_switching_key: self.key_switching_key.clone(),
         }
     }
 }

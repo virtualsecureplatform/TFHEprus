@@ -22,9 +22,9 @@ use tfheprus_circuits::{
 use tfheprus_core::{
     blind_rotate_ntt, bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt,
     extract_trivial_lwe_prefix, ggsw::cmux_ntt, glwe_keyswitch_ntt, sample_extract_index_zero,
-    sha3_256_field_elements, trivial_lwe_extraction_key, EvaluationKey, GlweCiphertext,
-    GlweKeySwitchKey, Goldilocks, LweCiphertext, Params, Polynomial, SecretKey, TestPolynomial,
-    DEFAULT_ENCRYPTION_NOISE_DESCRIPTION, GOLDILOCKS_MODULUS, SHA3_256_DOMAIN_PREFIX,
+    sha3_256_field_elements, trivial_lwe_extraction_key, EvaluationKey, GateEvaluationKey,
+    GlweCiphertext, GlweKeySwitchKey, Goldilocks, HomGate, LweCiphertext, Params, Polynomial,
+    SecretKey, TestPolynomial, GOLDILOCKS_MODULUS, SHA3_256_DOMAIN_PREFIX,
 };
 use tfheprus_prover::{
     build_aggregated_recursive_actual_pbs_chain_frontier_proof,
@@ -302,6 +302,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Some("profile-pbs-sha3-cost") => profile_pbs_sha3_cost_demo(parse_preset_arg(&args)?)?,
         Some("run-actual-pbs-native") => run_actual_pbs_native_demo(parse_preset_arg(&args)?),
+        Some("run-hom-gate-native") => run_hom_gate_native_demo(parse_hom_gate_preset_arg(&args)?),
         Some("-h" | "--help" | "help") => print_help(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -319,6 +320,7 @@ fn print_params() {
         ("toy", Params::toy()),
         ("moderate", Params::moderate_toy()),
         ("paper-v1", Params::paper_v1()),
+        ("secure-128", Params::secure_128()),
     ] {
         print_param_line(name, &params);
     }
@@ -399,7 +401,7 @@ fn prove_glwe_keyswitch_demo(preset: ParamPreset) -> Result<(), Box<dyn Error>> 
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
+        params.encryption_noise_description(),
         proof.public_inputs.len(),
         instance.private_inputs().len(),
         proof_bytes,
@@ -429,7 +431,7 @@ fn prove_glwe_keyswitch_private_key_digest_demo(preset: ParamPreset) -> Result<(
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
+        params.encryption_noise_description(),
         proof.public_inputs.len(),
         instance.private_key_digest_private_inputs().len(),
         instance.key_switch_key_ntt_digest().len(),
@@ -474,7 +476,7 @@ fn bench_glwe_keyswitch_modes_demo(preset: ParamPreset) -> Result<(), Box<dyn Er
         preset.name(),
         params.lwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
+        params.encryption_noise_description(),
         public_proof.public_inputs.len(),
         instance.private_inputs().len(),
         public_proof_bytes,
@@ -3681,7 +3683,7 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
         params.lwe_dimension,
         params.glwe_dimension,
         params.polynomial_size,
-        DEFAULT_ENCRYPTION_NOISE_DESCRIPTION
+        params.encryption_noise_description()
     );
     println!(
         "secret_keygen_ms={}, secret_keygen_us={}, eval_keygen_ms={}, eval_keygen_us={}, native_coeff_ms={}, native_coeff_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, native_ntt_ms={}, native_ntt_us={}, glwe_ks_keygen_ms={}, glwe_ks_keygen_us={}, glwe_keyswitch_ms={}, glwe_keyswitch_us={}",
@@ -3706,6 +3708,77 @@ fn run_actual_pbs_native_demo(preset: ParamPreset) {
         output.decrypt(&params, &sk.extracted_output_lwe_key()),
         switched_output.decrypt(&params, &sk.input_lwe)
     );
+}
+
+fn run_hom_gate_native_demo(preset: ParamPreset) {
+    let params = preset.params();
+    let mut rng = ChaCha20Rng::seed_from_u64(111);
+
+    let sk_started = Instant::now();
+    let sk = SecretKey::generate(&params, &mut rng);
+    let sk_time = sk_started.elapsed();
+
+    let gate_key_started = Instant::now();
+    let gate_key = GateEvaluationKey::generate(&params, &sk, &mut rng);
+    let gate_key_time = gate_key_started.elapsed();
+
+    let key_ntt_started = Instant::now();
+    let gate_key_ntt = gate_key.to_ntt();
+    let key_ntt_time = key_ntt_started.elapsed();
+
+    let gate = HomGate::Nand;
+    let mut total_gate_time = Duration::ZERO;
+    let mut outputs = Vec::new();
+    for lhs_message in [false, true] {
+        for rhs_message in [false, true] {
+            let lhs = LweCiphertext::encrypt_bool_with_params(
+                &params,
+                &sk.input_lwe,
+                lhs_message,
+                &mut rng,
+            );
+            let rhs = LweCiphertext::encrypt_bool_with_params(
+                &params,
+                &sk.input_lwe,
+                rhs_message,
+                &mut rng,
+            );
+            let gate_started = Instant::now();
+            let output = tfheprus_core::hom_gate_ntt(&params, &gate_key_ntt, gate, &lhs, &rhs);
+            total_gate_time += gate_started.elapsed();
+            let output_message = output.decrypt_bool(&sk.input_lwe);
+            let expected = gate.eval(lhs_message, rhs_message);
+            assert_eq!(output_message, expected);
+            outputs.push(format!(
+                "{}{}={}",
+                u8::from(lhs_message),
+                u8::from(rhs_message),
+                u8::from(output_message)
+            ));
+        }
+    }
+
+    println!(
+        "hom-gate native run: preset={}, gate=NAND, lwe_dimension={}, glwe_dimension={}, degree={}, noise={}",
+        preset.name(),
+        params.lwe_dimension,
+        params.glwe_dimension,
+        params.polynomial_size,
+        params.encryption_noise_description()
+    );
+    println!(
+        "secret_keygen_ms={}, secret_keygen_us={}, gate_keygen_ms={}, gate_keygen_us={}, key_ntt_precompute_ms={}, key_ntt_precompute_us={}, hom_gate_total_ms={}, hom_gate_total_us={}, hom_gate_avg_us={}",
+        sk_time.as_millis(),
+        sk_time.as_micros(),
+        gate_key_time.as_millis(),
+        gate_key_time.as_micros(),
+        key_ntt_time.as_millis(),
+        key_ntt_time.as_micros(),
+        total_gate_time.as_millis(),
+        total_gate_time.as_micros(),
+        total_gate_time.as_micros() / 4
+    );
+    println!("truth_table_outputs={}", outputs.join(","));
 }
 
 fn actual_pbs_instance(params: Params) -> (Params, SecretKey, ActualPbsInstance) {
@@ -3886,7 +3959,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1]|prove-pbs-step-private [toy|moderate|paper-v1]|prove-pbs-step-chain [toy|moderate|paper-v1]|prove-pbs-chain-chunk [toy|moderate|paper-v1] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-leaf-cost [toy|moderate|paper-v1] [chunk_steps] [shape|prove]|profile-pbs-chain-compact-append [toy|moderate|paper-v1] [chunk_steps]|profile-pbs-chain-tree [toy|moderate|paper-v1] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1]|run-actual-pbs-native [toy|moderate|paper-v1]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1|secure-128]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1|secure-128]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1|secure-128]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1|secure-128]|prove-pbs-step-private [toy|moderate|paper-v1|secure-128]|prove-pbs-step-chain [toy|moderate|paper-v1|secure-128]|prove-pbs-chain-chunk [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-leaf-cost [toy|moderate|paper-v1|secure-128] [chunk_steps] [shape|prove]|profile-pbs-chain-compact-append [toy|moderate|paper-v1|secure-128] [chunk_steps]|profile-pbs-chain-tree [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1|secure-128]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1|secure-128]|run-actual-pbs-native [toy|moderate|paper-v1|secure-128]|run-hom-gate-native [toy|moderate|paper-v1|secure-128]]"
     );
 }
 
@@ -3895,6 +3968,7 @@ enum ParamPreset {
     Toy,
     Moderate,
     PaperV1,
+    Secure128,
 }
 
 impl ParamPreset {
@@ -3903,6 +3977,7 @@ impl ParamPreset {
             Self::Toy => "toy",
             Self::Moderate => "moderate",
             Self::PaperV1 => "paper-v1",
+            Self::Secure128 => "secure-128",
         }
     }
 
@@ -3911,11 +3986,12 @@ impl ParamPreset {
             Self::Toy => Params::toy(),
             Self::Moderate => Params::moderate_toy(),
             Self::PaperV1 => Params::paper_v1(),
+            Self::Secure128 => Params::secure_128(),
         }
     }
 
     fn runs_coeff_reference(self) -> bool {
-        !matches!(self, Self::PaperV1)
+        !matches!(self, Self::PaperV1 | Self::Secure128)
     }
 }
 
@@ -3924,7 +4000,15 @@ fn parse_preset_arg(args: &[String]) -> Result<ParamPreset, Box<dyn Error>> {
         None | Some("toy") => Ok(ParamPreset::Toy),
         Some("moderate" | "moderate-toy" | "mid") => Ok(ParamPreset::Moderate),
         Some("paper" | "paper-v1") => Ok(ParamPreset::PaperV1),
+        Some("secure" | "secure-128" | "tfhe2048") => Ok(ParamPreset::Secure128),
         Some(other) => Err(format!("unknown parameter preset: {other}").into()),
+    }
+}
+
+fn parse_hom_gate_preset_arg(args: &[String]) -> Result<ParamPreset, Box<dyn Error>> {
+    match args.get(2) {
+        None => Ok(ParamPreset::Secure128),
+        Some(_) => parse_preset_arg(args),
     }
 }
 
@@ -4076,13 +4160,14 @@ fn optional_micros(duration: Option<std::time::Duration>) -> String {
 
 fn print_param_line(name: &str, params: &Params) {
     println!(
-        "{name}: n={}, N={}, k={}, B=2^{}, l={}, p={}",
+        "{name}: n={}, N={}, k={}, B=2^{}, l={}, p={}, noise={}",
         params.lwe_dimension,
         params.polynomial_size,
         params.glwe_dimension,
         params.decomposition_base_log,
         params.decomposition_level_count,
-        params.plaintext_modulus
+        params.plaintext_modulus,
+        params.encryption_noise_description()
     );
 }
 

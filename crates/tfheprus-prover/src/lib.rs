@@ -4,6 +4,7 @@ mod keccak;
 mod poseidon_chain;
 mod range_check;
 mod recursive;
+mod statement_digest;
 
 use core::{fmt, ops::Range};
 use std::collections::BTreeMap;
@@ -18,8 +19,8 @@ use p3_circuit::{AluOpKind, Op};
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
-    poseidon2_air_builders_d1, poseidon2_preprocessor, BatchStarkProof, BatchStarkProver,
-    CircuitProverData, ConstraintProfile, PrimitiveTable, TablePacking, NUM_PRIMITIVE_TABLES,
+    poseidon2_air_builders, poseidon2_preprocessor, recompose_air_builders, recompose_preprocessor,
+    BatchStarkProof, BatchStarkProver, CircuitProverData, ConstraintProfile, TablePacking,
 };
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
@@ -35,15 +36,18 @@ use range_check::{
     RangeCheckPreprocessor, RangeCheckProver, RANGE_CHECK_DEFAULT_LANES,
 };
 use serde::{Deserialize, Serialize};
+use statement_digest::{
+    StatementDigestAirBuilder, StatementDigestPreprocessor, StatementDigestProver,
+};
 use tfheprus_circuits::{
     build_actual_pbs_chain_chunk_circuit, build_actual_pbs_chain_chunk_shape_circuit,
     build_actual_pbs_circuit, build_actual_pbs_step_chain_circuit, build_actual_pbs_step_circuit,
     build_actual_pbs_step_private_circuit, build_glwe_keyswitch_circuit,
     build_glwe_keyswitch_private_key_digest_circuit, build_mul_xai_circuit, build_poly_mul_circuit,
-    build_sample_extract_circuit, ActualPbsChainChunkInstance, ActualPbsInstance,
-    ActualPbsStepChainInstance, ActualPbsStepInstance, ActualPbsStepPrivateInstance,
-    GlweKeyswitchInstance, MulXaiInstance, PolyMulInstance, SampleExtractInstance,
-    SELECTOR_DIGEST_WIDTH,
+    build_sample_extract_circuit, statement_public_inputs_digest, ActualPbsChainChunkInstance,
+    ActualPbsInstance, ActualPbsStepChainInstance, ActualPbsStepInstance,
+    ActualPbsStepPrivateInstance, GlweKeyswitchInstance, MulXaiInstance, P3CircuitField,
+    PolyMulInstance, SampleExtractInstance, SELECTOR_DIGEST_WIDTH,
 };
 use tfheprus_core::Params;
 
@@ -271,7 +275,7 @@ pub struct ActualPbsChainChunkProveProfile {
 pub struct ActualPbsChainChunkBaseProver {
     params: Params,
     step_count: usize,
-    circuit: Circuit<P3Goldilocks>,
+    circuit: Circuit<P3CircuitField>,
     table_packing: TablePacking,
     range_bit_counts: Vec<usize>,
     circuit_prover_data: CircuitProverData<GoldilocksConfig>,
@@ -287,7 +291,7 @@ impl ActualPbsChainChunkBaseProver {
         let air_builders = base_air_builders(&range_bit_counts);
         let config = base_goldilocks_config();
         let (airs_degrees, primitive_columns, non_primitive_columns) =
-            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
+            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
                 &circuit,
                 &table_packing,
                 &preprocessors,
@@ -2451,7 +2455,7 @@ fn aggregation_node_batch_proof<'a>(
     }
 }
 
-fn profile_circuit_operations(circuit: &Circuit<P3Goldilocks>) -> CircuitOperationProfile {
+fn profile_circuit_operations(circuit: &Circuit<P3CircuitField>) -> CircuitOperationProfile {
     let mut profile = CircuitOperationProfile {
         total_ops: circuit.ops.len(),
         witness_count: circuit.witness_count as usize,
@@ -2489,7 +2493,7 @@ fn profile_circuit_operations(circuit: &Circuit<P3Goldilocks>) -> CircuitOperati
     profile
 }
 
-fn profile_traces(traces: &p3_circuit::Traces<P3Goldilocks>) -> CircuitTraceProfile {
+fn profile_traces<F>(traces: &p3_circuit::Traces<F>) -> CircuitTraceProfile {
     let mut non_primitive_rows = BTreeMap::<String, usize>::new();
     for (op_type, trace) in &traces.non_primitive_traces {
         non_primitive_rows.insert(op_type.as_str().to_string(), trace.rows());
@@ -2559,7 +2563,7 @@ fn actual_pbs_leaf_logical_profile(
 }
 
 fn prove_circuit(
-    circuit: &Circuit<P3Goldilocks>,
+    circuit: &Circuit<P3CircuitField>,
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
@@ -2568,7 +2572,7 @@ fn prove_circuit(
 }
 
 fn prove_circuit_profiled(
-    circuit: &Circuit<P3Goldilocks>,
+    circuit: &Circuit<P3CircuitField>,
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<(BatchStarkProof<GoldilocksConfig>, CircuitProveProfile), ProofError> {
@@ -2581,7 +2585,7 @@ fn prove_circuit_profiled(
 
     let air_prep_started = Instant::now();
     let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
+        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
             circuit,
             &table_packing,
             &preprocessors,
@@ -2599,12 +2603,14 @@ fn prove_circuit_profiled(
     let prover_data_us = prover_data_started.elapsed().as_micros();
 
     let witness_started = Instant::now();
+    let circuit_public_inputs = base_inputs_to_circuit(public_inputs);
+    let circuit_private_inputs = base_inputs_to_circuit(private_inputs);
     let mut runner = circuit.runner();
     runner
-        .set_public_inputs(public_inputs)
+        .set_public_inputs(&circuit_public_inputs)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     runner
-        .set_private_inputs(private_inputs)
+        .set_private_inputs(&circuit_private_inputs)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let traces = runner
         .run()
@@ -2638,19 +2644,21 @@ fn prove_circuit_profiled(
 }
 
 fn prove_circuit_with_prepared(
-    circuit: &Circuit<P3Goldilocks>,
+    circuit: &Circuit<P3CircuitField>,
     table_packing: &TablePacking,
     range_bit_counts: &[usize],
     circuit_prover_data: &CircuitProverData<GoldilocksConfig>,
     public_inputs: &[P3Goldilocks],
     private_inputs: &[P3Goldilocks],
 ) -> Result<BatchStarkProof<GoldilocksConfig>, ProofError> {
+    let circuit_public_inputs = base_inputs_to_circuit(public_inputs);
+    let circuit_private_inputs = base_inputs_to_circuit(private_inputs);
     let mut runner = circuit.runner();
     runner
-        .set_public_inputs(public_inputs)
+        .set_public_inputs(&circuit_public_inputs)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     runner
-        .set_private_inputs(private_inputs)
+        .set_private_inputs(&circuit_private_inputs)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let traces = runner
         .run()
@@ -2664,16 +2672,17 @@ fn prove_circuit_with_prepared(
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
+fn base_inputs_to_circuit(inputs: &[P3Goldilocks]) -> Vec<P3CircuitField> {
+    inputs.iter().copied().map(P3CircuitField::from).collect()
+}
+
 fn verify_circuit_proof(
     proof: &BatchStarkProof<GoldilocksConfig>,
     expected_public_inputs: &[P3Goldilocks],
 ) -> Result<(), ProofError> {
-    if proof.primitive_public_values.len() != NUM_PRIMITIVE_TABLES {
-        return Err(ProofError::Plonky3(
-            "invalid primitive public-value table count".into(),
-        ));
-    }
-    if proof.primitive_public_values[PrimitiveTable::Public as usize] != expected_public_inputs {
+    let expected_digest = statement_public_inputs_digest(expected_public_inputs);
+    let actual_digest = proof_statement_digest(proof)?;
+    if actual_digest != expected_digest {
         return Err(ProofError::StatementMismatch);
     }
 
@@ -2689,17 +2698,31 @@ fn verify_circuit_proof(
 fn rebuild_circuit_proof_common_lookups(
     proof: &mut BatchStarkProof<GoldilocksConfig>,
 ) -> Result<(), ProofError> {
-    let config = base_goldilocks_config();
-    let mut prover = BatchStarkProver::new(config).with_table_packing(proof.table_packing.clone());
-    let range_bit_counts = proof_range_check_bit_counts(proof);
-    register_base_table_provers(&mut prover, &range_bit_counts);
-    prover
-        .rebuild_common_lookups(proof)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
+    let _ = proof;
+    Ok(())
+}
+
+fn proof_statement_digest(
+    proof: &BatchStarkProof<GoldilocksConfig>,
+) -> Result<[P3Goldilocks; SELECTOR_DIGEST_WIDTH], ProofError> {
+    let op_type = tfheprus_circuits::statement_digest::statement_digest_type_id();
+    let entry = proof
+        .non_primitives
+        .iter()
+        .find(|entry| entry.op_type == op_type)
+        .ok_or(ProofError::StatementMismatch)?;
+    if entry.public_values.len() != SELECTOR_DIGEST_WIDTH {
+        return Err(ProofError::StatementMismatch);
+    }
+    entry
+        .public_values
+        .clone()
+        .try_into()
+        .map_err(|_| ProofError::StatementMismatch)
 }
 
 fn verify_circuit_proof_for_circuit(
-    circuit: &Circuit<P3Goldilocks>,
+    circuit: &Circuit<P3CircuitField>,
     proof: &BatchStarkProof<GoldilocksConfig>,
     expected_public_inputs: &[P3Goldilocks],
 ) -> Result<(), ProofError> {
@@ -2712,7 +2735,7 @@ fn verify_circuit_proof_for_circuit(
 }
 
 fn expected_circuit_common_data(
-    circuit: &Circuit<P3Goldilocks>,
+    circuit: &Circuit<P3CircuitField>,
     table_packing: &TablePacking,
 ) -> Result<CommonData<GoldilocksConfig>, ProofError> {
     let config = base_goldilocks_config();
@@ -2720,7 +2743,7 @@ fn expected_circuit_common_data(
     let preprocessors = base_preprocessors(&range_bit_counts);
     let air_builders = base_air_builders(&range_bit_counts);
     let (airs_degrees, _primitive_columns, _non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 1>(
+        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
             circuit,
             table_packing,
             &preprocessors,
@@ -2765,15 +2788,24 @@ fn common_data_matches(
 fn base_preprocessors(
     bit_counts: &[usize],
 ) -> Vec<Box<dyn p3_circuit_prover::common::NpoPreprocessor<P3Goldilocks>>> {
-    let mut preprocessors = vec![poseidon2_preprocessor::<P3Goldilocks>()];
+    let mut preprocessors = vec![
+        Box::new(StatementDigestPreprocessor)
+            as Box<dyn p3_circuit_prover::common::NpoPreprocessor<P3Goldilocks>>,
+        poseidon2_preprocessor::<P3Goldilocks>(),
+        recompose_preprocessor::<P3Goldilocks>(false),
+    ];
     preprocessors.extend(range_preprocessors(bit_counts));
     preprocessors
 }
 
 fn base_air_builders(
     bit_counts: &[usize],
-) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>> {
-    let mut air_builders = poseidon2_air_builders_d1::<GoldilocksConfig>();
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 2>>> {
+    let mut air_builders: Vec<
+        Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 2>>,
+    > = vec![Box::new(StatementDigestAirBuilder)];
+    air_builders.extend(poseidon2_air_builders::<GoldilocksConfig, 2>());
+    air_builders.extend(recompose_air_builders::<GoldilocksConfig, 2>(1, false));
     air_builders.extend(range_air_builders(bit_counts));
     air_builders
 }
@@ -2790,14 +2822,14 @@ fn range_preprocessors(
 
 fn range_air_builders(
     bit_counts: &[usize],
-) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>> {
+) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 2>>> {
     bit_counts
         .iter()
         .map(|&bit_count| {
             Box::new(RangeCheckAirBuilder::new(
                 bit_count,
                 RANGE_CHECK_DEFAULT_LANES,
-            )) as Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 1>>
+            )) as Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 2>>
         })
         .collect()
 }
@@ -2806,7 +2838,9 @@ fn register_base_table_provers(
     prover: &mut BatchStarkProver<GoldilocksConfig>,
     bit_counts: &[usize],
 ) {
-    prover.register_poseidon2_table::<1>(Poseidon2Config::GOLDILOCKS_D1_W8);
+    prover.register_table_prover(Box::new(StatementDigestProver::new()));
+    prover.register_poseidon2_table::<2>(Poseidon2Config::GOLDILOCKS_D2_W8);
+    prover.register_recompose_table::<2>(false);
     register_range_check_provers(prover, bit_counts);
 }
 
@@ -2975,7 +3009,15 @@ mod tests {
         let other_instance = PolyMulInstance::new(other_lhs, other_rhs);
         let other_public_inputs = other_instance.public_inputs();
         proof.public_inputs = other_public_inputs.clone();
-        proof.proof.primitive_public_values[PrimitiveTable::Public as usize] = other_public_inputs;
+        let other_digest = statement_public_inputs_digest(&other_public_inputs);
+        let statement_digest_type = tfheprus_circuits::statement_digest::statement_digest_type_id();
+        let digest_entry = proof
+            .proof
+            .non_primitives
+            .iter_mut()
+            .find(|entry| entry.op_type == statement_digest_type)
+            .expect("statement digest table is present");
+        digest_entry.public_values = other_digest.to_vec();
 
         let err = verify_poly_mul_proof(&other_instance, &proof)
             .expect_err("tampered STARK public values must fail verification");

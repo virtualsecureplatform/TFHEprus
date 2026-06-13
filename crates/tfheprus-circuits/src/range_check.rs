@@ -11,7 +11,8 @@ use p3_circuit::ops::{
 };
 use p3_circuit::tables::{NonPrimitiveTrace, TraceGeneratorFn};
 use p3_circuit::{CircuitError, ExprId, WitnessId};
-use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
+use p3_goldilocks::Goldilocks as P3Goldilocks;
 
 const RANGE_CHECK_TYPE_PREFIX: &str = "tfheprus/range_check_u";
 
@@ -74,7 +75,7 @@ impl Debug for RangeCheckCircuitPlugin {
 
 impl<F> NpoCircuitPlugin<F> for RangeCheckCircuitPlugin
 where
-    F: Field + PrimeField64 + PrimeCharacteristicRing + Send + Sync + 'static,
+    F: Field + ExtensionField<P3Goldilocks> + PrimeCharacteristicRing + Send + Sync + 'static,
 {
     fn type_id(&self) -> NpoTypeId {
         range_check_type_id(self.bit_count)
@@ -121,7 +122,7 @@ where
 
 pub fn register_range_check_npo<F>(builder: &mut CircuitBuilder<F>, bit_count: usize)
 where
-    F: Field + PrimeField64 + PrimeCharacteristicRing + Send + Sync + 'static,
+    F: Field + ExtensionField<P3Goldilocks> + PrimeCharacteristicRing + Send + Sync + 'static,
 {
     assert_valid_bit_count(bit_count);
     builder.register_npo(RangeCheckCircuitPlugin { bit_count });
@@ -129,7 +130,7 @@ where
 
 pub fn range_check_expr<F>(builder: &mut CircuitBuilder<F>, value: ExprId, bit_count: usize)
 where
-    F: Field + PrimeField64 + PrimeCharacteristicRing + Send + Sync + 'static,
+    F: Field + ExtensionField<P3Goldilocks> + PrimeCharacteristicRing + Send + Sync + 'static,
 {
     assert_valid_bit_count(bit_count);
     builder.push_non_primitive_op_with_outputs(
@@ -274,7 +275,7 @@ impl<F> Debug for RangeCheckExecutor<F> {
 
 impl<F> NonPrimitiveExecutor<F> for RangeCheckExecutor<F>
 where
-    F: Field + PrimeField64 + PrimeCharacteristicRing + Send + Sync + 'static,
+    F: Field + ExtensionField<P3Goldilocks> + PrimeCharacteristicRing + Send + Sync + 'static,
 {
     fn execute(
         &self,
@@ -299,7 +300,12 @@ where
 
         let input_wid = inputs[0][0];
         let value = ctx.get_witness(input_wid)?;
-        let raw = value.as_canonical_u64();
+        let Some(base_value) = value.as_base() else {
+            return Err(CircuitError::InvalidPreprocessing {
+                reason: "range check witness must be base-field embedded",
+            });
+        };
+        let raw = base_value.as_canonical_u64();
         let limit = 1u64 << self.bit_count;
         if raw >= limit {
             return Err(CircuitError::InvalidPreprocessing {
@@ -308,7 +314,7 @@ where
         }
 
         let bits = (0..self.bit_count)
-            .map(|bit_index| F::from_u64((raw >> bit_index) & 1))
+            .map(|bit_index| F::from(P3Goldilocks::from_u64((raw >> bit_index) & 1)))
             .collect();
 
         let state = ctx.get_op_state_mut::<RangeCheckExecutionState<F>>(&self.op_type);

@@ -25,15 +25,21 @@ pub use glev::{
     GlevCiphertextNtt,
 };
 pub use glwe::{sample_extract_index_zero, GlweCiphertext, GlweCiphertextNtt, GlweSecretKey};
-pub use keys::{EvaluationKey, EvaluationKeyNtt, SecretKey};
-pub use keyswitch::{
-    extract_trivial_lwe_prefix, glwe_keyswitch, glwe_keyswitch_ntt, trivial_lwe_extraction_key,
-    GlweKeySwitchKey, GlweKeySwitchKeyNtt,
+pub use keys::{
+    EvaluationKey, EvaluationKeyNtt, GateEvaluationKey, GateEvaluationKeyNtt, SecretKey,
 };
-pub use lwe::{decode_message, encode_message, LweCiphertext, LweSecretKey};
+pub use keyswitch::{
+    extract_trivial_lwe_prefix, glwe_keyswitch, glwe_keyswitch_ntt, lwe_keyswitch,
+    trivial_lwe_extraction_key, GlweKeySwitchKey, GlweKeySwitchKeyNtt, LweKeySwitchKey,
+};
+pub use lwe::{
+    decode_bool, decode_message, encode_bool, encode_message, LweCiphertext, LweSecretKey,
+    BOOLEAN_MU,
+};
 pub use noise::{
     sample_centered_binomial_noise, sample_centered_binomial_noise_polynomial,
     sample_default_encryption_noise, sample_default_encryption_noise_polynomial,
+    sample_discrete_gaussian_noise, sample_encryption_noise, sample_encryption_noise_polynomial,
     sample_uniform_bounded_noise, sample_uniform_bounded_noise_polynomial,
     DEFAULT_ENCRYPTION_CBD_TERMS, DEFAULT_ENCRYPTION_NOISE_BOUND,
     DEFAULT_ENCRYPTION_NOISE_DESCRIPTION,
@@ -42,10 +48,12 @@ pub use ntt::{
     negacyclic_intt, negacyclic_mul_ntt, negacyclic_ntt, ntt, primitive_power_of_two_root,
     GOLDILOCKS_TWO_ADICITY,
 };
-pub use params::Params;
+pub use params::{EncryptionNoise, Params};
 pub use pbs::{
-    blind_rotate, blind_rotate_ntt, bootstrap_without_keyswitch, bootstrap_without_keyswitch_ntt,
-    mod_switch_to_exponent, TestPolynomial,
+    blind_rotate, blind_rotate_ntt, bootstrap_boolean, bootstrap_boolean_ntt,
+    bootstrap_with_keyswitch, bootstrap_with_keyswitch_ntt, bootstrap_without_keyswitch,
+    bootstrap_without_keyswitch_ntt, hom_gate, hom_gate_ntt, hom_nand, hom_nand_ntt,
+    mod_switch_to_exponent, HomGate, TestPolynomial,
 };
 pub use poly::{NttPolynomial, Polynomial};
 pub use sha3_commit::{

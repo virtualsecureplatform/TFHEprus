@@ -2,15 +2,20 @@
 
 pub mod range_check;
 pub mod sha3_circuit;
+pub mod statement_digest;
 
+use core::ops::{Deref, DerefMut};
 use p3_circuit::circuit::Circuit;
-use p3_circuit::ops::{generate_poseidon2_trace, GoldilocksD1Width8, Poseidon2Config};
+use p3_circuit::ops::{
+    generate_poseidon2_trace, generate_recompose_trace, GoldilocksD2Width8, Poseidon2Config,
+};
 use p3_circuit::{CircuitBuilder, ExprId};
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
 use rand_p3::SeedableRng;
 use range_check::{range_check_expr, register_range_check_npo};
+use statement_digest::{bind_statement_digest_exprs, register_statement_digest_npo};
 use tfheprus_core::ggsw::cmux;
 use tfheprus_core::{
     bootstrap_without_keyswitch, decompose_polynomial, decomposition_gadget_factor,
@@ -24,12 +29,14 @@ use tfheprus_core::{
 pub const SELECTOR_DIGEST_WIDTH: usize = 4;
 pub const SHA3_DIGEST_WIDTH: usize = SHA3_256_DIGEST_FIELD_ELEMENTS;
 pub const POSEIDON2_DIGEST_RATE: usize = 4;
+pub type P3CircuitField = BinomialExtensionField<P3Goldilocks, 2>;
 
 pub const SHA3_PBS_BSK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-bsk-chain";
 pub const SHA3_PBS_MASK_CHAIN_DOMAIN: &[u8] = b"tfheprus-pbs-mask-chain";
 pub const POSEIDON2_PBS_BSK_CHAIN_TAG: u64 = 0x7062_735f_6273_6b31;
 pub const POSEIDON2_PBS_MASK_CHAIN_TAG: u64 = 0x7062_735f_6d61_736b;
 pub const POSEIDON2_GLWE_KSK_NTT_TAG: u64 = 0x676c_7765_6b73_6b31;
+pub const POSEIDON2_STATEMENT_DIGEST_TAG: u64 = 0x7374_6d74_5f64_6731;
 
 pub const SELECTOR_DIGEST_CHUNK_SIZE: usize = 64;
 pub const SELECTOR_DIGEST_MIX_ROUNDS: usize = 3;
@@ -37,6 +44,95 @@ pub const SELECTOR_DIGEST_MDS: [[u64; SELECTOR_DIGEST_WIDTH]; SELECTOR_DIGEST_WI
     [[2, 3, 5, 7], [7, 2, 3, 5], [5, 7, 2, 3], [3, 5, 7, 2]];
 
 type PbsPoseidon2Hash = PaddingFreeSponge<Poseidon2Goldilocks<8>, 8, 4, SELECTOR_DIGEST_WIDTH>;
+
+struct StatementCircuitBuilder {
+    builder: CircuitBuilder<P3CircuitField>,
+    public_inputs: Vec<ExprId>,
+}
+
+impl StatementCircuitBuilder {
+    fn new() -> Self {
+        let mut builder = CircuitBuilder::<P3CircuitField>::new();
+        enable_pbs_chain_digest_npo(&mut builder);
+        register_statement_digest_npo(&mut builder);
+        Self {
+            builder,
+            public_inputs: Vec::new(),
+        }
+    }
+
+    fn alloc_public_inputs(&mut self, len: usize, label: &'static str) -> Vec<ExprId> {
+        let inputs = self.builder.alloc_public_inputs(len, label);
+        self.public_inputs.extend(inputs.iter().copied());
+        inputs
+    }
+
+    fn alloc_public_input_array<const N: usize>(&mut self, label: &'static str) -> [ExprId; N] {
+        let inputs = self.builder.alloc_public_input_array(label);
+        self.public_inputs.extend(inputs.iter().copied());
+        inputs
+    }
+
+    fn build(mut self) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitBuilderError> {
+        let digest = poseidon2_digest_expr(
+            &mut self.builder,
+            POSEIDON2_STATEMENT_DIGEST_TAG,
+            self.public_inputs.iter().copied(),
+        );
+        let one = self.builder.define_const(P3CircuitField::ONE);
+        let digest = digest.map(|limb| {
+            let shifted = self.builder.add(limb, one);
+            self.builder.sub(shifted, one)
+        });
+        bind_statement_digest_exprs(&mut self.builder, &digest);
+        self.builder.build()
+    }
+}
+
+impl Deref for StatementCircuitBuilder {
+    type Target = CircuitBuilder<P3CircuitField>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.builder
+    }
+}
+
+impl DerefMut for StatementCircuitBuilder {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.builder
+    }
+}
+
+fn new_statement_builder() -> StatementCircuitBuilder {
+    StatementCircuitBuilder::new()
+}
+
+fn alloc_public_inputs(
+    builder: &mut StatementCircuitBuilder,
+    len: usize,
+    label: &'static str,
+) -> Vec<ExprId> {
+    builder.alloc_public_inputs(len, label)
+}
+
+fn alloc_public_input_array<const N: usize>(
+    builder: &mut StatementCircuitBuilder,
+    label: &'static str,
+) -> [ExprId; N] {
+    builder.alloc_public_input_array(label)
+}
+
+fn assert_equal_expr(
+    builder: &mut CircuitBuilder<P3CircuitField>,
+    actual: ExprId,
+    expected: ExprId,
+) {
+    if actual == expected {
+        return;
+    }
+    let diff = builder.sub(actual, expected);
+    builder.assert_zero(diff);
+}
 
 #[derive(Clone)]
 struct GlweExpr {
@@ -674,19 +770,19 @@ impl ActualPbsCircuitProfile {
 
 pub fn build_poly_mul_circuit(
     degree: usize,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(degree > 0);
     assert!(degree.is_power_of_two());
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
-    let lhs = builder.alloc_public_inputs(degree, "poly_mul_lhs");
-    let rhs = builder.alloc_public_inputs(degree, "poly_mul_rhs");
-    let expected = builder.alloc_public_inputs(degree, "poly_mul_expected");
+    let mut builder = new_statement_builder();
+    let lhs = alloc_public_inputs(&mut builder, degree, "poly_mul_lhs");
+    let rhs = alloc_public_inputs(&mut builder, degree, "poly_mul_rhs");
+    let expected = alloc_public_inputs(&mut builder, degree, "poly_mul_expected");
 
     let computed = poly_mul_expr(&mut builder, &lhs, &rhs);
 
     for (actual, expected) in computed.into_iter().zip(expected) {
-        builder.connect(actual, expected);
+        assert_equal_expr(&mut builder, actual, expected);
     }
 
     Ok(builder.build()?)
@@ -695,15 +791,15 @@ pub fn build_poly_mul_circuit(
 pub fn build_mul_xai_circuit(
     degree: usize,
     exponent: usize,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(degree > 0);
     assert!(degree.is_power_of_two());
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
-    let input = builder.alloc_public_inputs(degree, "mul_xai_input");
-    let expected = builder.alloc_public_inputs(degree, "mul_xai_expected");
+    let mut builder = new_statement_builder();
+    let input = alloc_public_inputs(&mut builder, degree, "mul_xai_input");
+    let expected = alloc_public_inputs(&mut builder, degree, "mul_xai_expected");
 
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let zero = builder.define_const(P3CircuitField::ZERO);
     let mut computed = vec![zero; degree];
     let modulus = 2 * degree;
     let exponent = exponent % modulus;
@@ -718,7 +814,7 @@ pub fn build_mul_xai_circuit(
     }
 
     for (actual, expected) in computed.into_iter().zip(expected) {
-        builder.connect(actual, expected);
+        assert_equal_expr(&mut builder, actual, expected);
     }
 
     Ok(builder.build()?)
@@ -727,37 +823,45 @@ pub fn build_mul_xai_circuit(
 pub fn build_sample_extract_circuit(
     glwe_dimension: usize,
     degree: usize,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(glwe_dimension > 0);
     assert!(degree > 0);
     assert!(degree.is_power_of_two());
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     let mut glwe_masks = Vec::with_capacity(glwe_dimension);
     for _ in 0..glwe_dimension {
-        glwe_masks.push(builder.alloc_public_inputs(degree, "sample_extract_mask"));
+        glwe_masks.push(alloc_public_inputs(
+            &mut builder,
+            degree,
+            "sample_extract_mask",
+        ));
     }
-    let glwe_body = builder.alloc_public_inputs(degree, "sample_extract_body");
-    let lwe_mask = builder.alloc_public_inputs(glwe_dimension * degree, "sample_extract_lwe_mask");
-    let lwe_body = builder.alloc_public_inputs(1, "sample_extract_lwe_body");
+    let glwe_body = alloc_public_inputs(&mut builder, degree, "sample_extract_body");
+    let lwe_mask = alloc_public_inputs(
+        &mut builder,
+        glwe_dimension * degree,
+        "sample_extract_lwe_mask",
+    );
+    let lwe_body = alloc_public_inputs(&mut builder, 1, "sample_extract_lwe_body");
 
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let zero = builder.define_const(P3CircuitField::ZERO);
     for (row, poly) in glwe_masks.iter().enumerate() {
         let offset = row * degree;
-        builder.connect(poly[0], lwe_mask[offset]);
+        assert_equal_expr(&mut builder, poly[0], lwe_mask[offset]);
         for i in 1..degree {
             let negated = builder.sub(zero, poly[degree - i]);
-            builder.connect(negated, lwe_mask[offset + i]);
+            assert_equal_expr(&mut builder, negated, lwe_mask[offset + i]);
         }
     }
-    builder.connect(glwe_body[0], lwe_body[0]);
+    assert_equal_expr(&mut builder, glwe_body[0], lwe_body[0]);
 
     Ok(builder.build()?)
 }
 
 pub fn build_glwe_keyswitch_circuit(
     instance: &GlweKeyswitchInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert_eq!(instance.params.glwe_dimension, 1);
     assert!(instance.params.lwe_dimension <= instance.params.polynomial_size);
     assert_eq!(
@@ -770,7 +874,7 @@ pub fn build_glwe_keyswitch_circuit(
     );
     assert_eq!(instance.output.mask.len(), instance.params.lwe_dimension);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
@@ -778,11 +882,12 @@ pub fn build_glwe_keyswitch_circuit(
 
     let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
     let key_switch_key = alloc_public_glwe_keyswitch_key_ntt(&mut builder, &instance.params);
-    let output_mask = builder.alloc_public_inputs(
+    let output_mask = alloc_public_inputs(
+        &mut builder,
         instance.params.lwe_dimension,
         "glwe_keyswitch_output_lwe_mask",
     );
-    let output_body = builder.alloc_public_inputs(1, "glwe_keyswitch_output_lwe_body");
+    let output_body = alloc_public_inputs(&mut builder, 1, "glwe_keyswitch_output_lwe_body");
 
     let switched = glwe_keyswitch_expr(
         &mut builder,
@@ -797,7 +902,7 @@ pub fn build_glwe_keyswitch_circuit(
 
 pub fn build_glwe_keyswitch_private_key_digest_circuit(
     instance: &GlweKeyswitchInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert_eq!(instance.params.glwe_dimension, 1);
     assert!(instance.params.lwe_dimension <= instance.params.polynomial_size);
     assert_eq!(
@@ -810,7 +915,7 @@ pub fn build_glwe_keyswitch_private_key_digest_circuit(
     );
     assert_eq!(instance.output.mask.len(), instance.params.lwe_dimension);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
@@ -820,11 +925,12 @@ pub fn build_glwe_keyswitch_private_key_digest_circuit(
     let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
     let key_switch_key_digest = alloc_public_digest(&mut builder, "glwe_keyswitch_key_ntt_digest");
     let key_switch_key = alloc_private_glwe_keyswitch_key_ntt(&mut builder, &instance.params);
-    let output_mask = builder.alloc_public_inputs(
+    let output_mask = alloc_public_inputs(
+        &mut builder,
         instance.params.lwe_dimension,
         "glwe_keyswitch_output_lwe_mask",
     );
-    let output_body = builder.alloc_public_inputs(1, "glwe_keyswitch_output_lwe_body");
+    let output_body = alloc_public_inputs(&mut builder, 1, "glwe_keyswitch_output_lwe_body");
 
     let computed_digest = glwe_keyswitch_key_ntt_digest_expr(&mut builder, &key_switch_key);
     connect_digest(&mut builder, &computed_digest, &key_switch_key_digest);
@@ -841,7 +947,7 @@ pub fn build_glwe_keyswitch_private_key_digest_circuit(
 
 pub fn build_actual_pbs_circuit(
     instance: &ActualPbsInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(instance.params.polynomial_size > 0);
     assert!(instance.params.polynomial_size.is_power_of_two());
     assert!(instance.params.lwe_dimension > 0);
@@ -851,23 +957,31 @@ pub fn build_actual_pbs_circuit(
         instance.params.lwe_dimension
     );
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
     }
-    let input_mask = builder.alloc_public_inputs(instance.params.lwe_dimension, "actual_pbs_mask");
-    let input_body = builder.alloc_public_inputs(1, "actual_pbs_body");
-    let test_poly =
-        builder.alloc_public_inputs(instance.params.polynomial_size, "actual_pbs_test_poly");
+    let input_mask = alloc_public_inputs(
+        &mut builder,
+        instance.params.lwe_dimension,
+        "actual_pbs_mask",
+    );
+    let input_body = alloc_public_inputs(&mut builder, 1, "actual_pbs_body");
+    let test_poly = alloc_public_inputs(
+        &mut builder,
+        instance.params.polynomial_size,
+        "actual_pbs_test_poly",
+    );
     let bootstrapping_key = (0..instance.params.lwe_dimension)
         .map(|_| alloc_public_ggsw_ntt(&mut builder, &instance.params))
         .collect::<Vec<_>>();
-    let output_mask = builder.alloc_public_inputs(
+    let output_mask = alloc_public_inputs(
+        &mut builder,
         instance.params.glwe_dimension * instance.params.polynomial_size,
         "actual_pbs_output_mask",
     );
-    let output_body = builder.alloc_public_inputs(1, "actual_pbs_output_body");
+    let output_body = alloc_public_inputs(&mut builder, 1, "actual_pbs_output_body");
 
     let body_exponent_bits = mod_switch_exponent_bits_expr(
         &mut builder,
@@ -879,7 +993,7 @@ pub fn build_actual_pbs_circuit(
 
     let mut acc = GlweExpr {
         mask: vec![
-            vec![builder.define_const(P3Goldilocks::ZERO); instance.params.polynomial_size];
+            vec![builder.define_const(P3CircuitField::ZERO); instance.params.polynomial_size];
             instance.params.glwe_dimension
         ],
         body: mul_xai_by_bits_expr(&mut builder, &test_poly, &initial_exponent_bits),
@@ -902,18 +1016,18 @@ pub fn build_actual_pbs_circuit(
 
 pub fn build_actual_pbs_step_circuit(
     instance: &ActualPbsStepInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(instance.params.polynomial_size > 0);
     assert!(instance.params.polynomial_size.is_power_of_two());
     assert!(instance.params.glwe_dimension > 0);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
     }
 
-    let mask_value = builder.alloc_public_inputs(1, "actual_pbs_step_mask");
+    let mask_value = alloc_public_inputs(&mut builder, 1, "actual_pbs_step_mask");
     let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
     let selector = alloc_public_ggsw_ntt(&mut builder, &instance.params);
     let output_accumulator = alloc_public_glwe(&mut builder, &instance.params);
@@ -938,27 +1052,30 @@ pub fn build_actual_pbs_step_circuit(
 
 pub fn build_actual_pbs_step_private_circuit(
     instance: &ActualPbsStepPrivateInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(instance.params.polynomial_size > 0);
     assert!(instance.params.polynomial_size.is_power_of_two());
     assert!(instance.params.glwe_dimension > 0);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
         register_range_check_npo(&mut builder, error_bits);
     }
 
-    let mask_value = builder.alloc_public_inputs(1, "actual_pbs_step_private_mask");
+    let mask_value = alloc_public_inputs(&mut builder, 1, "actual_pbs_step_private_mask");
     let input_accumulator = alloc_public_glwe(&mut builder, &instance.params);
-    let selector_digest =
-        builder.alloc_public_inputs(SELECTOR_DIGEST_WIDTH, "actual_pbs_step_selector_digest");
+    let selector_digest = alloc_public_inputs(
+        &mut builder,
+        SELECTOR_DIGEST_WIDTH,
+        "actual_pbs_step_selector_digest",
+    );
     let output_accumulator = alloc_public_glwe(&mut builder, &instance.params);
     let selector = alloc_private_ggsw_ntt(&mut builder, &instance.params);
 
     let computed_digest = selector_digest_expr(&mut builder, &selector);
     for (&computed, &expected) in computed_digest.iter().zip(selector_digest.iter()) {
-        builder.connect(computed, expected);
+        assert_equal_expr(&mut builder, computed, expected);
     }
 
     let exponent_bits = mod_switch_exponent_bits_expr(
@@ -981,12 +1098,12 @@ pub fn build_actual_pbs_step_private_circuit(
 
 pub fn build_actual_pbs_step_chain_circuit(
     instance: &ActualPbsStepChainInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(instance.params.polynomial_size > 0);
     assert!(instance.params.polynomial_size.is_power_of_two());
     assert!(instance.params.glwe_dimension > 0);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     enable_pbs_chain_digest_npo(&mut builder);
     register_range_check_npo(&mut builder, instance.params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(&instance.params) {
@@ -1026,20 +1143,20 @@ pub fn build_actual_pbs_step_chain_circuit(
 
 pub fn build_actual_pbs_chain_chunk_circuit(
     instance: &ActualPbsChainChunkInstance,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     build_actual_pbs_chain_chunk_shape_circuit(&instance.params, instance.step_count())
 }
 
 pub fn build_actual_pbs_chain_chunk_shape_circuit(
     params: &Params,
     step_count: usize,
-) -> Result<Circuit<P3Goldilocks>, p3_circuit::CircuitError> {
+) -> Result<Circuit<P3CircuitField>, p3_circuit::CircuitError> {
     assert!(params.polynomial_size > 0);
     assert!(params.polynomial_size.is_power_of_two());
     assert!(params.glwe_dimension > 0);
     assert!(step_count > 0);
 
-    let mut builder = CircuitBuilder::<P3Goldilocks>::new();
+    let mut builder = new_statement_builder();
     enable_pbs_chain_digest_npo(&mut builder);
     register_range_check_npo(&mut builder, params.decomposition_base_log);
     if let Some(error_bits) = decomposition_error_bits(params) {
@@ -1077,6 +1194,18 @@ pub fn core_to_p3(value: Goldilocks) -> P3Goldilocks {
     P3Goldilocks::from_u64(value.value())
 }
 
+fn core_to_circuit(value: Goldilocks) -> P3CircuitField {
+    P3CircuitField::from(core_to_p3(value))
+}
+
+fn p3_to_circuit(value: P3Goldilocks) -> P3CircuitField {
+    P3CircuitField::from(value)
+}
+
+fn circuit_from_u64(value: u64) -> P3CircuitField {
+    p3_to_circuit(P3Goldilocks::from_u64(value))
+}
+
 fn p3_to_core(value: P3Goldilocks) -> Goldilocks {
     Goldilocks::from_u64(value.as_canonical_u64())
 }
@@ -1086,11 +1215,13 @@ fn goldilocks_poseidon2_8() -> Poseidon2Goldilocks<8> {
     Poseidon2Goldilocks::<8>::new_from_rng_128(&mut rng)
 }
 
-fn enable_pbs_chain_digest_npo(builder: &mut CircuitBuilder<P3Goldilocks>) {
-    builder.enable_poseidon2_perm_width_8::<GoldilocksD1Width8, _>(
-        generate_poseidon2_trace::<P3Goldilocks, GoldilocksD1Width8>,
+fn enable_pbs_chain_digest_npo(builder: &mut CircuitBuilder<P3CircuitField>) {
+    builder.enable_poseidon2_perm_width_8::<GoldilocksD2Width8, _>(
+        generate_poseidon2_trace::<P3CircuitField, GoldilocksD2Width8>,
         goldilocks_poseidon2_8(),
     );
+    builder
+        .enable_recompose::<P3Goldilocks>(generate_recompose_trace::<P3Goldilocks, P3CircuitField>);
 }
 
 pub fn selector_ntt_digest(ct: &GgswCiphertext) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
@@ -1151,24 +1282,37 @@ pub fn pbs_sha3_mask_digest_update(
     sha3_256_chain_update_fields(SHA3_PBS_MASK_CHAIN_DOMAIN, &previous, [mask_value])
 }
 
+pub fn statement_public_inputs_digest(
+    values: &[P3Goldilocks],
+) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    poseidon2_digest_p3(POSEIDON2_STATEMENT_DIGEST_TAG, values.iter().copied())
+}
+
 fn pbs_poseidon2_digest(
     tag: u64,
     values: impl IntoIterator<Item = Goldilocks>,
 ) -> [Goldilocks; SELECTOR_DIGEST_WIDTH] {
-    let input = pbs_poseidon2_digest_input(tag, values);
-    let hasher = PbsPoseidon2Hash::new(goldilocks_poseidon2_8());
-    hasher.hash_iter(input).map(p3_to_core)
+    poseidon2_digest_p3(tag, values.into_iter().map(core_to_p3)).map(p3_to_core)
 }
 
-fn pbs_poseidon2_digest_input(
+fn poseidon2_digest_p3(
     tag: u64,
-    values: impl IntoIterator<Item = Goldilocks>,
+    values: impl IntoIterator<Item = P3Goldilocks>,
+) -> [P3Goldilocks; SELECTOR_DIGEST_WIDTH] {
+    let input = poseidon2_digest_input_p3(tag, values);
+    let hasher = PbsPoseidon2Hash::new(goldilocks_poseidon2_8());
+    hasher.hash_iter(input)
+}
+
+fn poseidon2_digest_input_p3(
+    tag: u64,
+    values: impl IntoIterator<Item = P3Goldilocks>,
 ) -> Vec<P3Goldilocks> {
     let values = values.into_iter().collect::<Vec<_>>();
     let mut input = Vec::with_capacity(2 + values.len() + POSEIDON2_DIGEST_RATE);
     input.push(P3Goldilocks::from_u64(tag));
     input.push(P3Goldilocks::from_u64(values.len() as u64));
-    input.extend(values.into_iter().map(core_to_p3));
+    input.extend(values);
     while input.len() % POSEIDON2_DIGEST_RATE != 0 {
         input.push(P3Goldilocks::ZERO);
     }
@@ -1440,10 +1584,7 @@ fn decomposition_error_bits(params: &Params) -> Option<usize> {
     }
 }
 
-fn alloc_public_ggsw_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    params: &Params,
-) -> GgswNttExpr {
+fn alloc_public_ggsw_ntt(builder: &mut StatementCircuitBuilder, params: &Params) -> GgswNttExpr {
     let rows = (0..=params.glwe_dimension)
         .map(|_| alloc_public_glev_ntt(builder, params))
         .collect();
@@ -1451,7 +1592,7 @@ fn alloc_public_ggsw_ntt(
 }
 
 fn alloc_public_glwe_keyswitch_key_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut StatementCircuitBuilder,
     params: &Params,
 ) -> GlweKeySwitchKeyNttExpr {
     let rows = (0..params.glwe_dimension)
@@ -1461,7 +1602,7 @@ fn alloc_public_glwe_keyswitch_key_ntt(
 }
 
 fn alloc_private_glwe_keyswitch_key_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
 ) -> GlweKeySwitchKeyNttExpr {
     let rows = (0..params.glwe_dimension)
@@ -1471,7 +1612,7 @@ fn alloc_private_glwe_keyswitch_key_ntt(
 }
 
 fn alloc_private_ggsw_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
 ) -> GgswNttExpr {
     let rows = (0..=params.glwe_dimension)
@@ -1480,25 +1621,22 @@ fn alloc_private_ggsw_ntt(
     GgswNttExpr { rows }
 }
 
-fn alloc_public_glwe(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlweExpr {
+fn alloc_public_glwe(builder: &mut StatementCircuitBuilder, params: &Params) -> GlweExpr {
     let mask = (0..params.glwe_dimension)
-        .map(|_| builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_mask"))
+        .map(|_| alloc_public_inputs(builder, params.polynomial_size, "actual_pbs_glwe_mask"))
         .collect();
-    let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body");
+    let body = alloc_public_inputs(builder, params.polynomial_size, "actual_pbs_glwe_body");
     GlweExpr { mask, body }
 }
 
 fn alloc_public_digest(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut StatementCircuitBuilder,
     label: &'static str,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
-    builder.alloc_public_input_array(label)
+    alloc_public_input_array(builder, label)
 }
 
-fn alloc_public_glev_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    params: &Params,
-) -> GlevNttExpr {
+fn alloc_public_glev_ntt(builder: &mut StatementCircuitBuilder, params: &Params) -> GlevNttExpr {
     let levels = (0..params.decomposition_level_count)
         .map(|_| alloc_public_glwe_ntt(builder, params))
         .collect();
@@ -1506,7 +1644,7 @@ fn alloc_public_glev_ntt(
 }
 
 fn alloc_private_glev_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
 ) -> GlevNttExpr {
     let levels = (0..params.decomposition_level_count)
@@ -1515,19 +1653,16 @@ fn alloc_private_glev_ntt(
     GlevNttExpr { levels }
 }
 
-fn alloc_public_glwe_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
-    params: &Params,
-) -> GlweNttExpr {
+fn alloc_public_glwe_ntt(builder: &mut StatementCircuitBuilder, params: &Params) -> GlweNttExpr {
     let mask = (0..params.glwe_dimension)
-        .map(|_| builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_mask_ntt"))
+        .map(|_| alloc_public_inputs(builder, params.polynomial_size, "actual_pbs_glwe_mask_ntt"))
         .collect();
-    let body = builder.alloc_public_inputs(params.polynomial_size, "actual_pbs_glwe_body_ntt");
+    let body = alloc_public_inputs(builder, params.polynomial_size, "actual_pbs_glwe_body_ntt");
     GlweNttExpr { mask, body }
 }
 
 fn alloc_private_glwe_ntt(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
 ) -> GlweNttExpr {
     let mask = (0..params.glwe_dimension)
@@ -1538,7 +1673,7 @@ fn alloc_private_glwe_ntt(
 }
 
 fn connect_sample_extract(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     ct: &GlweExpr,
     output_mask: &[ExprId],
     output_body: ExprId,
@@ -1546,17 +1681,17 @@ fn connect_sample_extract(
     let degree = ct.body.len();
     for (row, poly) in ct.mask.iter().enumerate() {
         let offset = row * degree;
-        builder.connect(poly[0], output_mask[offset]);
+        assert_equal_expr(builder, poly[0], output_mask[offset]);
         for i in 1..degree {
             let negated = sub_from_zero(builder, poly[degree - i]);
-            builder.connect(negated, output_mask[offset + i]);
+            assert_equal_expr(builder, negated, output_mask[offset + i]);
         }
     }
-    builder.connect(ct.body[0], output_body);
+    assert_equal_expr(builder, ct.body[0], output_body);
 }
 
 fn connect_trivial_lwe_prefix(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     ct: &GlweExpr,
     output_mask: &[ExprId],
     output_body: ExprId,
@@ -1564,48 +1699,48 @@ fn connect_trivial_lwe_prefix(
     assert_eq!(ct.mask.len(), 1);
     assert!(output_mask.len() <= ct.body.len());
     for (&actual, &expected) in ct.mask[0].iter().zip(output_mask.iter()) {
-        builder.connect(actual, expected);
+        assert_equal_expr(builder, actual, expected);
     }
-    builder.connect(ct.body[0], output_body);
+    assert_equal_expr(builder, ct.body[0], output_body);
 }
 
 fn connect_glwe(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     actual: &GlweExpr,
     expected: &GlweExpr,
 ) {
     for (actual_poly, expected_poly) in actual.mask.iter().zip(expected.mask.iter()) {
         for (&actual_coeff, &expected_coeff) in actual_poly.iter().zip(expected_poly.iter()) {
-            builder.connect(actual_coeff, expected_coeff);
+            assert_equal_expr(builder, actual_coeff, expected_coeff);
         }
     }
     for (&actual_coeff, &expected_coeff) in actual.body.iter().zip(expected.body.iter()) {
-        builder.connect(actual_coeff, expected_coeff);
+        assert_equal_expr(builder, actual_coeff, expected_coeff);
     }
 }
 
 fn connect_digest(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     actual: &[ExprId; SELECTOR_DIGEST_WIDTH],
     expected: &[ExprId; SELECTOR_DIGEST_WIDTH],
 ) {
     for (&actual_limb, &expected_limb) in actual.iter().zip(expected.iter()) {
-        builder.connect(actual_limb, expected_limb);
+        assert_equal_expr(builder, actual_limb, expected_limb);
     }
 }
 
 fn selector_digest_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     selector: &GgswNttExpr,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
     let state = core::array::from_fn(|lane| {
-        builder.define_const(core_to_p3(selector_digest_initial_state(lane)))
+        builder.define_const(core_to_circuit(selector_digest_initial_state(lane)))
     });
     selector_digest_update_expr(builder, state, ggsw_ntt_expr_values(selector))
 }
 
 fn pbs_bsk_digest_update_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     previous: [ExprId; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = ExprId>,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
@@ -1613,7 +1748,7 @@ fn pbs_bsk_digest_update_expr(
 }
 
 fn pbs_mask_digest_update_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     previous: [ExprId; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = ExprId>,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
@@ -1621,7 +1756,7 @@ fn pbs_mask_digest_update_expr(
 }
 
 fn pbs_poseidon2_digest_update_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     tag: u64,
     previous: [ExprId; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = ExprId>,
@@ -1629,48 +1764,68 @@ fn pbs_poseidon2_digest_update_expr(
     let values = values.into_iter().collect::<Vec<_>>();
     let mut input =
         Vec::with_capacity(2 + SELECTOR_DIGEST_WIDTH + values.len() + POSEIDON2_DIGEST_RATE);
-    input.push(builder.define_const(P3Goldilocks::from_u64(tag)));
-    input.push(builder.define_const(P3Goldilocks::from_u64(
+    input.push(builder.define_const(circuit_from_u64(tag)));
+    input.push(builder.define_const(circuit_from_u64(
         (SELECTOR_DIGEST_WIDTH + values.len()) as u64,
     )));
     input.extend(previous);
     input.extend(values);
     while input.len() % POSEIDON2_DIGEST_RATE != 0 {
-        input.push(builder.define_const(P3Goldilocks::ZERO));
+        input.push(builder.define_const(P3CircuitField::ZERO));
     }
 
-    let outputs = builder
-        .add_hash_slice(&Poseidon2Config::GOLDILOCKS_D1_W8, &input, true)
-        .expect("Goldilocks D1 Poseidon2 digest NPO must be enabled");
-    outputs
-        .try_into()
-        .expect("Goldilocks D1 Poseidon2 digest exposes four base-field limbs")
+    poseidon2_digest_base_exprs(builder, &input)
 }
 
 fn poseidon2_digest_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     tag: u64,
     values: impl IntoIterator<Item = ExprId>,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
     let values = values.into_iter().collect::<Vec<_>>();
     let mut input = Vec::with_capacity(2 + values.len() + POSEIDON2_DIGEST_RATE);
-    input.push(builder.define_const(P3Goldilocks::from_u64(tag)));
-    input.push(builder.define_const(P3Goldilocks::from_u64(values.len() as u64)));
+    input.push(builder.define_const(circuit_from_u64(tag)));
+    input.push(builder.define_const(circuit_from_u64(values.len() as u64)));
     input.extend(values);
     while input.len() % POSEIDON2_DIGEST_RATE != 0 {
-        input.push(builder.define_const(P3Goldilocks::ZERO));
+        input.push(builder.define_const(P3CircuitField::ZERO));
+    }
+
+    poseidon2_digest_base_exprs(builder, &input)
+}
+
+fn poseidon2_digest_base_exprs(
+    builder: &mut CircuitBuilder<P3CircuitField>,
+    input: &[ExprId],
+) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
+    debug_assert!(input.len().is_multiple_of(POSEIDON2_DIGEST_RATE));
+    let mut packed = Vec::with_capacity(input.len() / 2);
+    for chunk in input.chunks_exact(2) {
+        packed.push(
+            builder
+                .recompose_base_coeffs_to_ext_via_alu::<P3Goldilocks>(chunk)
+                .expect("Goldilocks D2 digest inputs must pack in pairs"),
+        );
     }
 
     let outputs = builder
-        .add_hash_slice(&Poseidon2Config::GOLDILOCKS_D1_W8, &input, true)
-        .expect("Goldilocks D1 Poseidon2 digest NPO must be enabled");
-    outputs
+        .add_hash_slice(&Poseidon2Config::GOLDILOCKS_D2_W8, &packed, true)
+        .expect("Goldilocks D2 Poseidon2 digest NPO must be enabled");
+    let mut digest = Vec::with_capacity(SELECTOR_DIGEST_WIDTH);
+    for output in outputs.into_iter().take(2) {
+        digest.extend(
+            builder
+                .decompose_ext_to_base_coeffs::<P3Goldilocks>(output)
+                .expect("Goldilocks D2 digest outputs must decompose to base limbs"),
+        );
+    }
+    digest
         .try_into()
-        .expect("Goldilocks D1 Poseidon2 digest exposes four base-field limbs")
+        .expect("Goldilocks D2 Poseidon2 digest exposes four base-field limbs")
 }
 
 fn glwe_keyswitch_key_ntt_digest_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     ksk: &GlweKeySwitchKeyNttExpr,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
     poseidon2_digest_expr(
@@ -1681,7 +1836,7 @@ fn glwe_keyswitch_key_ntt_digest_expr(
 }
 
 fn selector_digest_update_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     mut state: [ExprId; SELECTOR_DIGEST_WIDTH],
     values: impl IntoIterator<Item = ExprId>,
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
@@ -1695,7 +1850,7 @@ fn selector_digest_update_expr(
         }
     }
 
-    let count_const = builder.define_const(core_to_p3(Goldilocks::from_u64(count as u64)));
+    let count_const = builder.define_const(core_to_circuit(Goldilocks::from_u64(count as u64)));
     state[0] = builder.add(state[0], count_const);
     selector_digest_mix_expr(builder, &mut state, count);
     state
@@ -1728,7 +1883,7 @@ fn glwe_keyswitch_key_ntt_expr_values(ksk: &GlweKeySwitchKeyNttExpr) -> Vec<Expr
 }
 
 fn selector_digest_absorb_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
     index: usize,
     value: ExprId,
@@ -1739,14 +1894,15 @@ fn selector_digest_absorb_expr(
 }
 
 fn selector_digest_mix_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     state: &mut [ExprId; SELECTOR_DIGEST_WIDTH],
     domain: usize,
 ) {
     for round in 0..SELECTOR_DIGEST_MIX_ROUNDS {
         let powered = core::array::from_fn(|lane| {
-            let round_const =
-                builder.define_const(core_to_p3(selector_digest_round_const(domain, round, lane)));
+            let round_const = builder.define_const(core_to_circuit(selector_digest_round_const(
+                domain, round, lane,
+            )));
             let shifted = builder.add(state[lane], round_const);
             pow7_expr(builder, shifted)
         });
@@ -1755,11 +1911,11 @@ fn selector_digest_mix_expr(
 }
 
 fn selector_digest_mds_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     values: &[ExprId; SELECTOR_DIGEST_WIDTH],
 ) -> [ExprId; SELECTOR_DIGEST_WIDTH] {
     core::array::from_fn(|row| {
-        let zero = builder.define_const(P3Goldilocks::ZERO);
+        let zero = builder.define_const(P3CircuitField::ZERO);
         values
             .iter()
             .zip(SELECTOR_DIGEST_MDS[row].iter())
@@ -1770,7 +1926,7 @@ fn selector_digest_mds_expr(
     })
 }
 
-fn pow7_expr(builder: &mut CircuitBuilder<P3Goldilocks>, value: ExprId) -> ExprId {
+fn pow7_expr(builder: &mut CircuitBuilder<P3CircuitField>, value: ExprId) -> ExprId {
     let squared = builder.mul(value, value);
     let fourth = builder.mul(squared, squared);
     let sixth = builder.mul(fourth, squared);
@@ -1778,7 +1934,7 @@ fn pow7_expr(builder: &mut CircuitBuilder<P3Goldilocks>, value: ExprId) -> ExprI
 }
 
 fn cmux_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     c0: &GlweExpr,
     c1: &GlweExpr,
@@ -1790,7 +1946,7 @@ fn cmux_expr(
 }
 
 fn external_product_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     ct: &GlweExpr,
     ggsw: &GgswNttExpr,
@@ -1810,14 +1966,14 @@ fn external_product_expr(
 }
 
 fn glwe_keyswitch_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     ksk: &GlweKeySwitchKeyNttExpr,
     ct: &GlweExpr,
 ) -> GlweExpr {
     let mut acc = GlweExpr {
         mask: vec![vec![
-            builder.define_const(P3Goldilocks::ZERO);
+            builder.define_const(P3CircuitField::ZERO);
             params.polynomial_size
         ]],
         body: ct.body.clone(),
@@ -1830,13 +1986,13 @@ fn glwe_keyswitch_expr(
 }
 
 fn glev_external_product_by_plain_poly_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     ct: &GlevNttExpr,
     poly: &[ExprId],
 ) -> GlweExpr {
     let digits = decompose_poly_expr(builder, params, poly);
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let zero = builder.define_const(P3CircuitField::ZERO);
     let mut mask_acc = vec![vec![zero; params.polynomial_size]; params.glwe_dimension];
     let mut body_acc = vec![zero; params.polynomial_size];
     for (digit_poly, level_ct) in digits.iter().zip(ct.levels.iter()) {
@@ -1856,7 +2012,7 @@ fn glev_external_product_by_plain_poly_expr(
 }
 
 fn accumulate_ntt_product_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     acc: &mut [ExprId],
     lhs_eval: &[ExprId],
     rhs_eval: &[ExprId],
@@ -1870,11 +2026,11 @@ fn accumulate_ntt_product_expr(
 }
 
 fn decompose_poly_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     poly: &[ExprId],
 ) -> Vec<Vec<ExprId>> {
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let zero = builder.define_const(P3CircuitField::ZERO);
     let mut levels = vec![vec![zero; poly.len()]; params.decomposition_level_count];
     for (coeff_index, &coeff) in poly.iter().enumerate() {
         let mut reconstructed = zero;
@@ -1894,7 +2050,7 @@ fn decompose_poly_expr(
 }
 
 fn signed_digit_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     raw_digit: ExprId,
 ) -> ExprId {
@@ -1902,13 +2058,13 @@ fn signed_digit_expr(
         raw_digit
     } else {
         let half_base = Goldilocks::from_u64(1u64 << (params.decomposition_base_log - 1));
-        let neg_half_const = builder.define_const(core_to_p3(-half_base));
+        let neg_half_const = builder.define_const(core_to_circuit(-half_base));
         builder.add(raw_digit, neg_half_const)
     }
 }
 
 fn add_approximation_error_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     params: &Params,
     reconstructed: ExprId,
 ) -> ExprId {
@@ -1929,7 +2085,7 @@ fn add_approximation_error_expr(
 }
 
 fn mod_switch_exponent_bits_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     value: ExprId,
     exponent_modulus: usize,
 ) -> Vec<ExprId> {
@@ -1942,11 +2098,11 @@ fn mod_switch_exponent_bits_expr(
 }
 
 fn decompose_canonical_torus_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     value: ExprId,
 ) -> Vec<ExprId> {
-    let zero = builder.define_const(P3Goldilocks::ZERO);
-    let one = builder.define_const(P3Goldilocks::ONE);
+    let zero = builder.define_const(P3CircuitField::ZERO);
+    let one = builder.define_const(P3CircuitField::ONE);
     let mut reconstructed = zero;
     let mut low_word = zero;
     let mut high_all_ones = one;
@@ -1976,7 +2132,7 @@ fn decompose_canonical_torus_expr(
 }
 
 fn add_bit_mod_power_of_two_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     bits: &[ExprId],
     addend: ExprId,
 ) -> Vec<ExprId> {
@@ -1994,10 +2150,10 @@ fn add_bit_mod_power_of_two_expr(
 }
 
 fn negate_bits_mod_power_of_two_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     bits: &[ExprId],
 ) -> Vec<ExprId> {
-    let one = builder.define_const(P3Goldilocks::ONE);
+    let one = builder.define_const(P3CircuitField::ONE);
     let inverted = bits
         .iter()
         .map(|&bit| builder.sub(one, bit))
@@ -2005,8 +2161,8 @@ fn negate_bits_mod_power_of_two_expr(
     add_bit_mod_power_of_two_expr(builder, &inverted, one)
 }
 
-fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -> GlweExpr {
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+fn zero_glwe_expr(builder: &mut CircuitBuilder<P3CircuitField>, params: &Params) -> GlweExpr {
+    let zero = builder.define_const(P3CircuitField::ZERO);
     GlweExpr {
         mask: vec![vec![zero; params.polynomial_size]; params.glwe_dimension],
         body: vec![zero; params.polynomial_size],
@@ -2014,7 +2170,7 @@ fn zero_glwe_expr(builder: &mut CircuitBuilder<P3Goldilocks>, params: &Params) -
 }
 
 fn glwe_mul_xai_by_bits_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     ct: &GlweExpr,
     exponent_bits: &[ExprId],
 ) -> GlweExpr {
@@ -2029,7 +2185,7 @@ fn glwe_mul_xai_by_bits_expr(
 }
 
 fn glwe_add_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs: &GlweExpr,
     rhs: &GlweExpr,
 ) -> GlweExpr {
@@ -2045,7 +2201,7 @@ fn glwe_add_expr(
 }
 
 fn glwe_sub_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs: &GlweExpr,
     rhs: &GlweExpr,
 ) -> GlweExpr {
@@ -2061,7 +2217,7 @@ fn glwe_sub_expr(
 }
 
 fn poly_add_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs: &[ExprId],
     rhs: &[ExprId],
 ) -> Vec<ExprId> {
@@ -2072,7 +2228,7 @@ fn poly_add_expr(
 }
 
 fn poly_sub_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs: &[ExprId],
     rhs: &[ExprId],
 ) -> Vec<ExprId> {
@@ -2083,7 +2239,7 @@ fn poly_sub_expr(
 }
 
 fn poly_mul_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs: &[ExprId],
     rhs: &[ExprId],
 ) -> Vec<ExprId> {
@@ -2094,7 +2250,7 @@ fn poly_mul_expr(
 }
 
 fn poly_mul_ntt_evals_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     lhs_eval: &[ExprId],
     rhs_eval: &[ExprId],
 ) -> Vec<ExprId> {
@@ -2110,7 +2266,7 @@ fn poly_mul_ntt_evals_expr(
 }
 
 fn negacyclic_ntt_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     values: &[ExprId],
 ) -> Vec<ExprId> {
     let n = values.len();
@@ -2123,7 +2279,7 @@ fn negacyclic_ntt_expr(
 }
 
 fn negacyclic_intt_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     values: &mut [ExprId],
 ) -> Vec<ExprId> {
     let n = values.len();
@@ -2135,7 +2291,7 @@ fn negacyclic_intt_expr(
     untwist_expr(builder, values, psi_inv)
 }
 
-fn ntt_expr(builder: &mut CircuitBuilder<P3Goldilocks>, values: &mut [ExprId], inverse: bool) {
+fn ntt_expr(builder: &mut CircuitBuilder<P3CircuitField>, values: &mut [ExprId], inverse: bool) {
     let n = values.len();
     assert!(n.is_power_of_two());
     bit_reverse_expr(values);
@@ -2175,7 +2331,7 @@ fn ntt_expr(builder: &mut CircuitBuilder<P3Goldilocks>, values: &mut [ExprId], i
 }
 
 fn twist_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     values: &[ExprId],
     psi: Goldilocks,
 ) -> Vec<ExprId> {
@@ -2191,7 +2347,7 @@ fn twist_expr(
 }
 
 fn untwist_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     values: &[ExprId],
     psi_inv: Goldilocks,
 ) -> Vec<ExprId> {
@@ -2207,16 +2363,16 @@ fn untwist_expr(
 }
 
 fn mul_const_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     value: ExprId,
     constant: Goldilocks,
 ) -> ExprId {
     if constant == Goldilocks::ZERO {
-        builder.define_const(P3Goldilocks::ZERO)
+        builder.define_const(P3CircuitField::ZERO)
     } else if constant == Goldilocks::ONE {
         value
     } else {
-        let constant = builder.define_const(core_to_p3(constant));
+        let constant = builder.define_const(core_to_circuit(constant));
         builder.mul(value, constant)
     }
 }
@@ -2233,14 +2389,14 @@ fn bit_reverse_expr(values: &mut [ExprId]) {
 }
 
 fn mul_xai_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     poly: &[ExprId],
     exponent: usize,
 ) -> Vec<ExprId> {
     let n = poly.len();
     let modulus = 2 * n;
     let exponent = exponent % modulus;
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+    let zero = builder.define_const(P3CircuitField::ZERO);
     let mut out = vec![zero; n];
     for (i, &cell) in poly.iter().enumerate() {
         let target = (i + exponent) % modulus;
@@ -2254,7 +2410,7 @@ fn mul_xai_expr(
 }
 
 fn mul_xai_by_bits_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     poly: &[ExprId],
     exponent_bits: &[ExprId],
 ) -> Vec<ExprId> {
@@ -2267,7 +2423,7 @@ fn mul_xai_by_bits_expr(
 }
 
 fn select_poly_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     selector: ExprId,
     when_zero: &[ExprId],
     when_one: &[ExprId],
@@ -2280,7 +2436,7 @@ fn select_poly_expr(
 }
 
 fn select_expr(
-    builder: &mut CircuitBuilder<P3Goldilocks>,
+    builder: &mut CircuitBuilder<P3CircuitField>,
     selector: ExprId,
     when_zero: ExprId,
     when_one: ExprId,
@@ -2290,14 +2446,34 @@ fn select_expr(
     builder.add(when_zero, selected_delta)
 }
 
-fn sub_from_zero(builder: &mut CircuitBuilder<P3Goldilocks>, value: ExprId) -> ExprId {
-    let zero = builder.define_const(P3Goldilocks::ZERO);
+fn sub_from_zero(builder: &mut CircuitBuilder<P3CircuitField>, value: ExprId) -> ExprId {
+    let zero = builder.define_const(P3CircuitField::ZERO);
     builder.sub(zero, value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn to_circuit_inputs(values: Vec<P3Goldilocks>) -> Vec<P3CircuitField> {
+        values.into_iter().map(p3_to_circuit).collect()
+    }
+
+    fn set_runner_public_inputs(
+        runner: &mut p3_circuit::CircuitRunner<'_, P3CircuitField>,
+        values: Vec<P3Goldilocks>,
+    ) {
+        let values = to_circuit_inputs(values);
+        runner.set_public_inputs(&values).unwrap();
+    }
+
+    fn set_runner_private_inputs(
+        runner: &mut p3_circuit::CircuitRunner<'_, P3CircuitField>,
+        values: Vec<P3Goldilocks>,
+    ) {
+        let values = to_circuit_inputs(values);
+        runner.set_private_inputs(&values).unwrap();
+    }
 
     #[test]
     fn poly_mul_circuit_runs_against_native_instance() {
@@ -2306,7 +2482,7 @@ mod tests {
         let instance = PolyMulInstance::new(lhs, rhs);
         let circuit = build_poly_mul_circuit(instance.degree()).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
         runner.run().unwrap();
     }
 
@@ -2317,7 +2493,7 @@ mod tests {
         let instance = MulXaiInstance::new(input, 5);
         let circuit = build_mul_xai_circuit(instance.degree(), instance.exponent).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
         runner.run().unwrap();
     }
 
@@ -2336,7 +2512,7 @@ mod tests {
         let circuit =
             build_sample_extract_circuit(instance.glwe_dimension(), instance.degree()).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
         runner.run().unwrap();
     }
 
@@ -2372,10 +2548,8 @@ mod tests {
 
         let circuit = build_glwe_keyswitch_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
@@ -2408,12 +2582,8 @@ mod tests {
 
         let circuit = build_glwe_keyswitch_private_key_digest_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner
-            .set_public_inputs(&instance.private_key_digest_public_inputs())
-            .unwrap();
-        runner
-            .set_private_inputs(&instance.private_key_digest_private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.private_key_digest_public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_key_digest_private_inputs());
         runner.run().unwrap();
     }
 
@@ -2445,10 +2615,8 @@ mod tests {
         );
         let circuit = build_actual_pbs_step_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
@@ -2484,10 +2652,8 @@ mod tests {
 
         let circuit = build_actual_pbs_step_private_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
@@ -2514,10 +2680,8 @@ mod tests {
 
         let circuit = build_actual_pbs_step_chain_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
@@ -2548,10 +2712,8 @@ mod tests {
 
         let circuit = build_actual_pbs_chain_chunk_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
@@ -2594,10 +2756,8 @@ mod tests {
         assert_eq!(profile.private_inputs, instance.private_inputs().len());
         let circuit = build_actual_pbs_circuit(&instance).unwrap();
         let mut runner = circuit.runner();
-        runner.set_public_inputs(&instance.public_inputs()).unwrap();
-        runner
-            .set_private_inputs(&instance.private_inputs())
-            .unwrap();
+        set_runner_public_inputs(&mut runner, instance.public_inputs());
+        set_runner_private_inputs(&mut runner, instance.private_inputs());
         runner.run().unwrap();
     }
 
