@@ -426,9 +426,17 @@ noisy ciphertext values.
 
 ## Validation
 
+The recursive prover uses the pinned upstream
+[`Plonky3/Plonky3-recursion`](https://github.com/Plonky3/Plonky3-recursion)
+submodule. Initialize it before building; the workspace Plonky3 dependencies
+must match the versions used by that submodule.
+Regenerate saved proof artifacts after updating these dependencies, because
+upstream proof formats and transcripts can change.
+
 Run:
 
 ```bash
+git submodule update --init --recursive
 cargo fmt --check
 cargo check --workspace
 cargo test
@@ -443,4 +451,13 @@ cargo test --release -p tfheprus-prover \
   compact_recursive_private_pbs_public_inputs_remain_summary_only -- --ignored --nocapture
 cargo test -p tfheprus-prover \
   compact_pbs_root_and_keyswitch_are_one_recursive_proof -- --ignored --nocapture
+```
+
+Those PBS tests currently reach the existing unsupported recursive statement
+binding guard. To check the upstream recursive verifier and shared FRI paths
+independently, run:
+
+```bash
+cargo test --release -p tfheprus-prover \
+  proves_recursive_verifier_with_shared_fri_paths -- --ignored
 ```

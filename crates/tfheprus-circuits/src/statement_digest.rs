@@ -99,7 +99,7 @@ where
 
         let input_wids = data.input_exprs[0]
             .iter()
-            .map(|&expr| ctx.resolve_witness_id(expr, "StatementDigest input"))
+            .map(|&expr| ctx.resolve_witness_id(expr, || "StatementDigest input".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Op::NonPrimitiveOpWithExecutor {
             inputs: vec![input_wids],
@@ -220,10 +220,6 @@ where
 
     fn op_type(&self) -> &NpoTypeId {
         &self.op_type
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn preprocess(

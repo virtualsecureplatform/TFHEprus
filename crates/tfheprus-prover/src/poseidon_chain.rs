@@ -145,7 +145,7 @@ mod tests {
             .unwrap();
         let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
         let config = goldilocks_config();
-        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees).unwrap();
         let circuit_prover_data =
             CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -155,6 +155,6 @@ mod tests {
         let proof = prover
             .prove_all_tables(&traces, &circuit_prover_data)
             .unwrap();
-        prover.verify_all_tables(&proof).unwrap();
+        prover.verify_all_tables::<Challenge>(&proof).unwrap();
     }
 }

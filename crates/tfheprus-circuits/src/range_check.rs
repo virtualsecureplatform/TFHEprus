@@ -102,7 +102,8 @@ where
             });
         }
 
-        let input_wid = ctx.resolve_witness_id(data.input_exprs[0][0], "RangeCheck input")?;
+        let input_wid =
+            ctx.resolve_witness_id(data.input_exprs[0][0], || "RangeCheck input".to_string())?;
         Ok(Op::NonPrimitiveOpWithExecutor {
             inputs: vec![vec![input_wid]],
             outputs: Vec::new(),
@@ -330,10 +331,6 @@ where
 
     fn op_type(&self) -> &NpoTypeId {
         &self.op_type
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn preprocess(

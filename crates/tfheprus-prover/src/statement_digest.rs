@@ -15,7 +15,7 @@ use p3_circuit_prover::config::{GoldilocksConfig, StarkField};
 use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
 use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing};
 use p3_goldilocks::Goldilocks as P3Goldilocks;
-use p3_lookup::builder::InteractionBuilder;
+use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_uni_stark::{SymbolicExpression, SymbolicExpressionExt};
 use tfheprus_circuits::statement_digest::{
@@ -128,7 +128,7 @@ where
             let mut fields = Vec::with_capacity(1 + D);
             fields.push(witness_idx);
             fields.extend(value_coeffs.iter().map(|coeff| (*coeff).into()));
-            builder.push_interaction("WitnessChecks", fields, multiplicity, 1);
+            builder.push_interaction("WitnessChecks", fields, Count::bounded(multiplicity, 1));
         }
     }
 }

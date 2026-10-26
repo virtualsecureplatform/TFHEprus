@@ -89,7 +89,8 @@ pub fn prove_keccak_f1600(
     };
     let public_inputs = statement.public_inputs();
     let config = base_goldilocks_config();
-    let proof = prove(&config, &PublicKeccakF1600Air, trace, &public_inputs);
+    let proof = prove(&config, &PublicKeccakF1600Air, trace, &public_inputs)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(KeccakF1600Proof {
         statement,

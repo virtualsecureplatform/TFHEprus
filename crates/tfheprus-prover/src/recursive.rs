@@ -9,19 +9,20 @@ use p3_circuit::{Circuit, CircuitBuilder, ExprId};
 use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
-    poseidon2_air_builders, poseidon2_preprocessor, recompose_air_builders, recompose_preprocessor,
-    recompose_table_provers, BatchStarkProof, BatchStarkProver, CircuitProverData,
-    ConstraintProfile, Poseidon2ProverD2, PrimitiveTable, TablePacking, TableProver,
-    NUM_PRIMITIVE_TABLES,
+    poseidon2_air_builders_for_configs, poseidon2_preprocessor, recompose_air_builders,
+    recompose_preprocessor, recompose_table_provers, BatchStarkProof, BatchStarkProver,
+    CircuitProverData, ConstraintProfile, Poseidon2ProverD2, PrimitiveTable, TablePacking,
+    TableProver, NUM_PRIMITIVE_TABLES,
 };
-use p3_commit::ExtensionMmcs;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::{Goldilocks as P3Goldilocks, Poseidon2Goldilocks};
 use p3_lookup::logup::LogUpGadget;
-use p3_merkle_tree::MerkleTreeMmcs;
+use p3_recursion::backend::replay_batch_layer_transcript;
+use p3_recursion::generation::{observe_opened_values, OpeningTranscript};
 use p3_recursion::pcs::{
-    set_fri_mmcs_private_data, InputProofTargets, MerkleCapTargets, RecExtensionValMmcs, RecValMmcs,
+    restore_fri_query_paths, set_fri_mmcs_private_data, InputProofTargets, MerkleCapTargets,
+    RecExtensionValMmcs, RecValMmcs,
 };
 use p3_recursion::public_inputs::BatchStarkVerifierInputsBuilder;
 use p3_recursion::verifier::{verify_p3_batch_proof_circuit, VerificationError};
@@ -34,9 +35,10 @@ use crate::range_check::{
 use crate::{
     base_goldilocks_config, goldilocks_config, goldilocks_poseidon2_8, poseidon_chain,
     proof_table_packing, ProofError, RecursiveProofSizeBreakdown, BASE_PROOF_FRI_COMMIT_POW_BITS,
-    BASE_PROOF_FRI_LOG_BLOWUP, BASE_PROOF_FRI_LOG_FINAL_POLY_LEN, BASE_PROOF_FRI_QUERY_POW_BITS,
-    PROOF_FRI_COMMIT_POW_BITS, PROOF_FRI_LOG_BLOWUP, PROOF_FRI_LOG_FINAL_POLY_LEN,
-    PROOF_FRI_QUERY_POW_BITS,
+    BASE_PROOF_FRI_LOG_BLOWUP, BASE_PROOF_FRI_LOG_FINAL_POLY_LEN, BASE_PROOF_FRI_MAX_LOG_ARITY,
+    BASE_PROOF_FRI_NUM_QUERIES, BASE_PROOF_FRI_QUERY_POW_BITS, PROOF_FRI_COMMIT_POW_BITS,
+    PROOF_FRI_LOG_BLOWUP, PROOF_FRI_LOG_FINAL_POLY_LEN, PROOF_FRI_MAX_LOG_ARITY,
+    PROOF_FRI_NUM_QUERIES, PROOF_FRI_QUERY_POW_BITS,
 };
 
 type F = P3Goldilocks;
@@ -44,15 +46,6 @@ type Challenge = BinomialExtensionField<F, 2>;
 type Perm = Poseidon2Goldilocks<8>;
 type MyHash = PaddingFreeSponge<Perm, 8, 4, 4>;
 type MyCompress = TruncatedPermutation<Perm, 2, 4, 8>;
-type MyMmcs = MerkleTreeMmcs<
-    <F as p3_field::Field>::Packing,
-    <F as p3_field::Field>::Packing,
-    MyHash,
-    MyCompress,
-    2,
-    4,
->;
-type ChallengeMmcs = ExtensionMmcs<F, Challenge, MyMmcs>;
 type InnerFri = p3_recursion::pcs::FriProofTargets<
     F,
     Challenge,
@@ -172,23 +165,21 @@ pub(crate) fn prove_recursive_batch_with_leaf_summary(
     runner
         .set_private_inputs(&private_inputs)
         .map_err(|error| ProofError::Plonky3(format!("set recursive private inputs: {error:?}")))?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
-        &mut runner,
-        &mmcs_op_ids,
-        &proof.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
-    )
-    .map_err(|error| ProofError::Plonky3(format!("set recursive FRI private data: {error}")))?;
+    set_proof_fri_private_data(&mut runner, &mmcs_op_ids, proof, base_fri_verifier_params())
+        .map_err(|error| ProofError::Plonky3(format!("set recursive FRI private data: {error}")))?;
     let traces = runner.run().map_err(|error| {
         ProofError::Plonky3(format!("run recursive verifier circuit: {error:?}"))
     })?;
 
     let preprocessors = vec![
         poseidon2_preprocessor::<F>(),
-        recompose_preprocessor::<F>(false),
+        recompose_preprocessor::<F>(true),
     ];
-    let mut air_builders = poseidon2_air_builders::<GoldilocksConfig, 2>();
-    air_builders.extend(recompose_air_builders::<GoldilocksConfig, 2>(1, false));
+    let mut air_builders = poseidon2_air_builders_for_configs::<GoldilocksConfig, 2>(vec![
+        Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    ]);
+    air_builders.extend(recompose_air_builders::<GoldilocksConfig, 2>(1, true));
     let (airs_degrees, primitive_columns, non_primitive_columns) =
         get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
             &verification_circuit,
@@ -199,7 +190,8 @@ pub(crate) fn prove_recursive_batch_with_leaf_summary(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -241,15 +233,10 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
         .map_err(|error| {
             ProofError::Plonky3(format!("set private recursive verifier inputs: {error:?}"))
         })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
-        &mut runner,
-        &mmcs_op_ids,
-        &proof.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
-    )
-    .map_err(|error| {
-        ProofError::Plonky3(format!("set private recursive FRI private data: {error}"))
-    })?;
+    set_proof_fri_private_data(&mut runner, &mmcs_op_ids, proof, base_fri_verifier_params())
+        .map_err(|error| {
+            ProofError::Plonky3(format!("set private recursive FRI private data: {error}"))
+        })?;
     let traces = runner.run().map_err(|error| {
         ProofError::Plonky3(format!("run private recursive verifier circuit: {error:?}"))
     })?;
@@ -266,7 +253,8 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -316,17 +304,12 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
                 "set private compact recursive verifier inputs: {error:?}"
             ))
         })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
-        &mut runner,
-        &mmcs_op_ids,
-        &proof.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
-    )
-    .map_err(|error| {
-        ProofError::Plonky3(format!(
-            "set private compact recursive FRI private data: {error}"
-        ))
-    })?;
+    set_proof_fri_private_data(&mut runner, &mmcs_op_ids, proof, base_fri_verifier_params())
+        .map_err(|error| {
+            ProofError::Plonky3(format!(
+                "set private compact recursive FRI private data: {error}"
+            ))
+        })?;
     let traces = runner.run().map_err(|error| {
         ProofError::Plonky3(format!(
             "run private compact recursive verifier circuit: {error:?}"
@@ -345,7 +328,8 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -400,7 +384,8 @@ impl PrivateCompactLeafRecursionProver {
             )
             .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees);
+        let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let circuit_prover_data =
             CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -434,11 +419,11 @@ impl PrivateCompactLeafRecursionProver {
                     "set cached private compact recursive verifier inputs: {error:?}"
                 ))
             })?;
-        set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        set_proof_fri_private_data(
             &mut runner,
             &self.mmcs_op_ids,
-            &proof.proof.opening_proof,
-            Poseidon2Config::GOLDILOCKS_D2_W8,
+            proof,
+            base_fri_verifier_params(),
         )
         .map_err(|error| {
             ProofError::Plonky3(format!(
@@ -510,7 +495,8 @@ impl PrivateCompactAppendRecursionProver {
             )
             .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let circuit_prover_data =
             CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -549,22 +535,22 @@ impl PrivateCompactAppendRecursionProver {
                     "set cached private compact append verifier inputs: {error:?}"
                 ))
             })?;
-        set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        set_proof_fri_private_data(
             &mut runner,
             &self.previous_mmcs_op_ids,
-            &previous.proof.opening_proof,
-            Poseidon2Config::GOLDILOCKS_D2_W8,
+            previous,
+            recursive_fri_verifier_params(),
         )
         .map_err(|error| {
             ProofError::Plonky3(format!(
                 "set cached previous compact append FRI private data: {error}"
             ))
         })?;
-        set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+        set_proof_fri_private_data(
             &mut runner,
             &self.chunk_mmcs_op_ids,
-            &chunk.proof.opening_proof,
-            Poseidon2Config::GOLDILOCKS_D2_W8,
+            chunk,
+            base_fri_verifier_params(),
         )
         .map_err(|error| {
             ProofError::Plonky3(format!(
@@ -648,20 +634,20 @@ pub(crate) fn prove_aggregate_batch_proofs_with_chain_summary(
     runner
         .set_private_inputs(&private_inputs)
         .map_err(|error| ProofError::Plonky3(format!("set aggregate private inputs: {error:?}")))?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &left_mmcs_op_ids,
-        &left.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        left,
+        recursive_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!("set left aggregate FRI private data: {error}"))
     })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &right_mmcs_op_ids,
-        &right.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        right,
+        recursive_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!("set right aggregate FRI private data: {error}"))
@@ -682,7 +668,8 @@ pub(crate) fn prove_aggregate_batch_proofs_with_chain_summary(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -725,22 +712,22 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
         .map_err(|error| {
             ProofError::Plonky3(format!("set private aggregate verifier inputs: {error:?}"))
         })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &left_mmcs_op_ids,
-        &left.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        left,
+        recursive_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!(
             "set left private aggregate FRI private data: {error}"
         ))
     })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &right_mmcs_op_ids,
-        &right.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        right,
+        recursive_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!(
@@ -763,7 +750,8 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -836,22 +824,22 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
                 "set private PBS/key-switch aggregate verifier inputs: {error:?}"
             ))
         })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &root_mmcs_op_ids,
-        &root.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        root,
+        recursive_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!(
             "set compact root private aggregate FRI private data: {error}"
         ))
     })?;
-    set_fri_mmcs_private_data::<F, Challenge, ChallengeMmcs, MyMmcs, MyHash, MyCompress, 4>(
+    set_proof_fri_private_data(
         &mut runner,
         &key_mmcs_op_ids,
-        &key_switch.proof.opening_proof,
-        Poseidon2Config::GOLDILOCKS_D2_W8,
+        key_switch,
+        base_fri_verifier_params(),
     )
     .map_err(|error| {
         ProofError::Plonky3(format!(
@@ -876,7 +864,8 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -2018,8 +2007,9 @@ fn recursive_verifier_prover(
     table_packing: TablePacking,
 ) -> BatchStarkProver<GoldilocksConfig> {
     let mut prover = BatchStarkProver::new(config).with_table_packing(table_packing);
+    prover.register_poseidon2_table::<2>(Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger());
     prover.register_poseidon2_table::<2>(Poseidon2Config::GOLDILOCKS_D2_W8);
-    prover.register_recompose_table::<2>(false);
+    prover.register_recompose_table::<2>(true);
     prover
 }
 
@@ -2027,14 +2017,17 @@ fn recursive_verifier_preprocessors() -> Vec<Box<dyn p3_circuit_prover::common::
 {
     vec![
         poseidon2_preprocessor::<F>(),
-        recompose_preprocessor::<F>(false),
+        recompose_preprocessor::<F>(true),
     ]
 }
 
 fn recursive_verifier_air_builders(
 ) -> Vec<Box<dyn p3_circuit_prover::common::NpoAirBuilder<GoldilocksConfig, 2>>> {
-    let mut air_builders = poseidon2_air_builders::<GoldilocksConfig, 2>();
-    air_builders.extend(recompose_air_builders::<GoldilocksConfig, 2>(1, false));
+    let mut air_builders = poseidon2_air_builders_for_configs::<GoldilocksConfig, 2>(vec![
+        Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    ]);
+    air_builders.extend(recompose_air_builders::<GoldilocksConfig, 2>(1, true));
     air_builders
 }
 
@@ -2055,7 +2048,14 @@ fn recursive_batch_table_provers() -> Vec<Box<dyn TableProver<GoldilocksConfig>>
             Poseidon2Config::GOLDILOCKS_D2_W8,
             ConstraintProfile::Standard,
         ))];
-    provers.extend(recompose_table_provers::<GoldilocksConfig, 2>(1, false));
+    provers.insert(
+        0,
+        Box::new(Poseidon2ProverD2::new(
+            Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+            ConstraintProfile::Standard,
+        )),
+    );
+    provers.extend(recompose_table_provers::<GoldilocksConfig, 2>(1, true));
     provers
 }
 
@@ -2067,7 +2067,17 @@ fn base_table_provers(
             Poseidon2Config::GOLDILOCKS_D2_W8,
             ConstraintProfile::Standard,
         ))];
-    provers.extend(recompose_table_provers::<GoldilocksConfig, 2>(1, false));
+    provers.push(Box::new(
+        crate::statement_digest::StatementDigestProver::new(),
+    ));
+    provers.insert(
+        0,
+        Box::new(Poseidon2ProverD2::new(
+            Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+            ConstraintProfile::Standard,
+        )),
+    );
+    provers.extend(recompose_table_provers::<GoldilocksConfig, 2>(1, true));
     provers.extend(
         proof_range_check_bit_counts(proof)
             .into_iter()
@@ -2076,7 +2086,78 @@ fn base_table_provers(
                     as Box<dyn TableProver<GoldilocksConfig>>
             }),
     );
-    provers
+    // Recursive verification pairs plugins with the proof manifest by position.
+    proof
+        .non_primitives
+        .iter()
+        .filter_map(|entry| {
+            provers
+                .iter()
+                .position(|prover| prover.op_type() == entry.op_type)
+                .map(|index| provers.remove(index))
+        })
+        .collect()
+}
+
+// Restore per-query Merkle paths from the shared FRI multiproof using the
+// same transcript and parameters as the proof's native verifier.
+fn set_proof_fri_private_data(
+    runner: &mut p3_circuit::CircuitRunner<'_, Challenge>,
+    op_ids: &[p3_circuit::NonPrimitiveOpId],
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    params: p3_recursion::FriVerifierParams,
+) -> Result<(), String> {
+    let config = crate::goldilocks_config_with_fri(
+        params.log_blowup(),
+        params.log_final_poly_len(),
+        params.max_log_arity(),
+        params.num_queries(),
+        params.commit_pow_bits(),
+        params.query_pow_bits(),
+    );
+    let OpeningTranscript {
+        mut challenger,
+        commitments_with_opening_points,
+    } = replay_batch_layer_transcript::<GoldilocksConfig, 2>(
+        &config,
+        proof,
+        &proof.stark_common,
+        &base_table_provers(proof),
+    )
+    .map_err(|error| format!("replay FRI transcript: {error:?}"))?;
+    let (mmcs, fri_params) = crate::goldilocks_fri_instance(
+        params.log_blowup(),
+        params.log_final_poly_len(),
+        params.max_log_arity(),
+        params.num_queries(),
+        params.commit_pow_bits(),
+        params.query_pow_bits(),
+    );
+    observe_opened_values::<GoldilocksConfig>(
+        &mut challenger,
+        &commitments_with_opening_points,
+        fri_params.batch_proof_of_work_bits,
+    );
+    let claims: Vec<_> = commitments_with_opening_points
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let paths = restore_fri_query_paths(
+        &fri_params,
+        &mmcs,
+        &mmcs,
+        &proof.proof.opening_proof,
+        &mut challenger,
+        &claims,
+    )
+    .map_err(|error| format!("restore FRI paths: {error:?}"))?;
+    set_fri_mmcs_private_data::<F, Challenge, 4>(
+        runner,
+        op_ids,
+        &paths,
+        Poseidon2Config::GOLDILOCKS_D2_W8,
+    )
+    .map_err(str::to_string)
 }
 
 fn recursive_proof_size_breakdown(
@@ -2089,7 +2170,7 @@ fn recursive_proof_size_breakdown(
     let commitments_bytes = serialized_len(&proof.proof.commitments)?;
     let opened_values_bytes = serialized_len(&proof.proof.opened_values)?;
     let opening_proof_bytes = serialized_len(&proof.proof.opening_proof)?;
-    let global_lookup_data_bytes = serialized_len(&proof.proof.global_lookup_data)?;
+    let global_lookup_data_bytes = serialized_len(&proof.proof.lookup_terminals)?;
     let degree_bits_bytes = serialized_len(&proof.proof.degree_bits)?;
     let primitive_public_values_bytes = 0;
     let non_primitives_bytes = serialized_len(&proof.non_primitives)?;
@@ -2168,8 +2249,10 @@ fn base_fri_verifier_params() -> p3_recursion::FriVerifierParams {
     p3_recursion::FriVerifierParams::with_mmcs(
         BASE_PROOF_FRI_LOG_BLOWUP,
         BASE_PROOF_FRI_LOG_FINAL_POLY_LEN,
+        BASE_PROOF_FRI_MAX_LOG_ARITY,
         BASE_PROOF_FRI_COMMIT_POW_BITS,
         BASE_PROOF_FRI_QUERY_POW_BITS,
+        BASE_PROOF_FRI_NUM_QUERIES,
         Poseidon2Config::GOLDILOCKS_D2_W8,
     )
 }
@@ -2178,8 +2261,10 @@ fn recursive_fri_verifier_params() -> p3_recursion::FriVerifierParams {
     p3_recursion::FriVerifierParams::with_mmcs(
         PROOF_FRI_LOG_BLOWUP,
         PROOF_FRI_LOG_FINAL_POLY_LEN,
+        PROOF_FRI_MAX_LOG_ARITY,
         PROOF_FRI_COMMIT_POW_BITS,
         PROOF_FRI_QUERY_POW_BITS,
+        PROOF_FRI_NUM_QUERIES,
         Poseidon2Config::GOLDILOCKS_D2_W8,
     )
 }
@@ -2198,6 +2283,55 @@ fn recursive_statement_binding_unsupported() -> ProofError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "recursive proof smoke is expensive"]
+    fn proves_recursive_verifier_with_shared_fri_paths() {
+        use tfheprus_circuits::PolyMulInstance;
+        use tfheprus_core::Polynomial;
+
+        let instance = PolyMulInstance::new(
+            Polynomial::from_coeffs(vec![1u64.into(), 2u64.into(), 3u64.into(), 4u64.into()]),
+            Polynomial::from_coeffs(vec![5u64.into(), 6u64.into(), 7u64.into(), 8u64.into()]),
+        );
+        let base = crate::prove_poly_mul(&instance).unwrap();
+        let (circuit, inputs, op_ids) =
+            build_verifier_circuit(&base.proof, &base_goldilocks_config()).unwrap();
+        let (public, private) = inputs.pack_values(
+            &table_public_inputs(&base.proof),
+            &base.proof.proof,
+            &base.proof.stark_common,
+        );
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(&public).unwrap();
+        runner.set_private_inputs(&private).unwrap();
+        set_proof_fri_private_data(
+            &mut runner,
+            &op_ids,
+            &base.proof,
+            base_fri_verifier_params(),
+        )
+        .unwrap();
+        let traces = runner.run().unwrap();
+
+        let packing = proof_table_packing();
+        let (airs_degrees, primitive_columns, non_primitive_columns) =
+            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
+                &circuit,
+                &packing,
+                &recursive_verifier_preprocessors(),
+                &recursive_verifier_air_builders(),
+                ConstraintProfile::Standard,
+            )
+            .unwrap();
+        let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
+        let config = goldilocks_config();
+        let data = ProverData::from_airs_and_degrees(&config, &airs, &degrees).unwrap();
+        let data = CircuitProverData::new(data, primitive_columns, non_primitive_columns);
+        let prover = recursive_verifier_prover(config, packing);
+        let proof = prover.prove_all_tables(&traces, &data).unwrap();
+        prover.verify_all_tables::<Challenge>(&proof).unwrap();
+    }
 
     #[test]
     fn verifies_public_summary_suffix() {

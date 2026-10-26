@@ -300,7 +300,8 @@ impl ActualPbsChainChunkBaseProver {
             )
             .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let circuit_prover_data =
             CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
 
@@ -2597,7 +2598,8 @@ fn prove_circuit_profiled(
     let air_prep_us = air_prep_started.elapsed().as_micros();
 
     let prover_data_started = Instant::now();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees);
+    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
         CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
     let prover_data_us = prover_data_started.elapsed().as_micros();
@@ -2691,7 +2693,7 @@ fn verify_circuit_proof(
     let range_bit_counts = proof_range_check_bit_counts(proof);
     register_base_table_provers(&mut prover, &range_bit_counts);
     prover
-        .verify_all_tables(proof)
+        .verify_all_tables::<P3CircuitField>(proof)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
@@ -2752,7 +2754,9 @@ fn expected_circuit_common_data(
         )
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
-    Ok(ProverData::from_airs_and_degrees(&config, &airs, &degrees).common)
+    Ok(ProverData::from_airs_and_degrees(&config, &airs, &degrees)
+        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?
+        .common)
 }
 
 fn common_data_matches(
@@ -2898,12 +2902,35 @@ fn goldilocks_config_with_fri(
     commit_proof_of_work_bits: usize,
     query_proof_of_work_bits: usize,
 ) -> GoldilocksConfig {
+    let (val_mmcs, fri_params) = goldilocks_fri_instance(
+        log_blowup,
+        log_final_poly_len,
+        max_log_arity,
+        num_queries,
+        commit_proof_of_work_bits,
+        query_proof_of_work_bits,
+    );
+    let pcs = TwoAdicFriPcs::new(Radix2DitParallel::default(), val_mmcs, fri_params);
+    let challenger = DuplexChallenger::new(goldilocks_poseidon2_8());
+    StarkConfig::new(pcs, challenger)
+}
+
+fn goldilocks_fri_instance(
+    log_blowup: usize,
+    log_final_poly_len: usize,
+    max_log_arity: usize,
+    num_queries: usize,
+    commit_proof_of_work_bits: usize,
+    query_proof_of_work_bits: usize,
+) -> (
+    P3Mmcs,
+    FriParameters<ExtensionMmcs<P3Goldilocks, P3Challenge, P3Mmcs>>,
+) {
     let perm = goldilocks_poseidon2_8();
     let hash = P3Hash::new(perm.clone());
-    let compress = P3Compress::new(perm.clone());
+    let compress = P3Compress::new(perm);
     let val_mmcs = P3Mmcs::new(hash, compress, MERKLE_CAP_HEIGHT);
-    let challenge_mmcs = ExtensionMmcs::<P3Goldilocks, P3Challenge, P3Mmcs>::new(val_mmcs.clone());
-    let dft = Radix2DitParallel::default();
+    let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let fri_params = FriParameters {
         log_blowup,
         log_final_poly_len,
@@ -2911,12 +2938,10 @@ fn goldilocks_config_with_fri(
         num_queries,
         commit_proof_of_work_bits,
         query_proof_of_work_bits,
+        batch_proof_of_work_bits: 0,
         mmcs: challenge_mmcs,
     };
-    let pcs = TwoAdicFriPcs::new(dft, val_mmcs, fri_params);
-    let challenger = DuplexChallenger::new(perm);
-
-    StarkConfig::new(pcs, challenger)
+    (val_mmcs, fri_params)
 }
 
 pub(crate) fn base_proof_table_packing() -> TablePacking {
