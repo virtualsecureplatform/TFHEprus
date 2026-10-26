@@ -85,6 +85,14 @@ impl StatementCircuitBuilder {
             self.builder.sub(shifted, one)
         });
         bind_statement_digest_exprs(&mut self.builder, &digest);
+        let exports = self
+            .public_inputs
+            .iter()
+            .copied()
+            .map(p3_circuit::StatementExport::Base)
+            .collect::<Vec<_>>();
+        self.builder
+            .set_statement_exports::<P3Goldilocks>(&exports)?;
         self.builder.build()
     }
 }

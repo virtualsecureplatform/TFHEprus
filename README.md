@@ -103,9 +103,11 @@ the TFHE-style LWE identity key switch used by `GateEvaluationKey` and
 - The PBS circuit consumes the bootstrapping key in twisted NTT form, matching
   the TFHEpp-style transformed-key path and avoiding a key-side NTT inside each
   polynomial product.
-- Circuit public inputs are bound into the batch-STARK Fiat-Shamir transcript
-  through the primitive Public table, and verifier wrappers check that the
-  embedded public statement matches the requested TFHEprus instance.
+- Base circuit public inputs and recursive summaries are bound into the
+  batch-STARK transcript through upstream's Statement table. Recursive proofs
+  export only their summaries; child-proof boundary values remain local execution
+  witnesses. Verifier wrappers compare the exported statement with the requested
+  TFHEprus instance.
 - Batch STARK prove/verify wrappers for these circuits.
 - CLI smoke test:
 
@@ -453,11 +455,31 @@ cargo test -p tfheprus-prover \
   compact_pbs_root_and_keyswitch_are_one_recursive_proof -- --ignored --nocapture
 ```
 
-Those PBS tests currently reach the existing unsupported recursive statement
-binding guard. To check the upstream recursive verifier and shared FRI paths
-independently, run:
+To check the upstream recursive verifier, shared FRI paths, and rejection of
+altered statement sidecars and manifest values, run:
 
 ```bash
 cargo test --release -p tfheprus-prover \
   proves_recursive_verifier_with_shared_fri_paths -- --ignored
 ```
+
+Regenerate a complete toy PBS root and its recursive key-switch artifact with:
+
+```bash
+cargo run --release -p tfheprus-cli -- bench-pbs-chain-private-compact \
+  toy 2 4 target/pbs-checkpoints-toy-upstream-statement-bound
+cargo run --release -p tfheprus-cli -- prove-compact-root-keyswitch-recursive \
+  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root.bin \
+  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root-keyswitch-final.bin
+cargo run --release -p tfheprus-cli -- verify-compact-root-keyswitch-recursive \
+  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root-keyswitch-final.bin
+```
+
+The Statement-table run verified all eight toy PBS steps, a 219964-byte root
+with 31 public fields, and a 224700-byte final artifact with 40 public fields.
+The key-switched output message was `3`.
+
+Statement binding does not pin a trusted circuit relation: the existing legacy
+batch-verifier APIs still reconstruct AIRs and preprocessing from proof metadata.
+Standalone artifacts remain a PoC until verifier keys are independently retained
+and authenticated.
