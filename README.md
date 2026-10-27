@@ -116,7 +116,7 @@ cargo run -p tfheprus-cli -- prove-poly-mul
 cargo run -p tfheprus-cli -- prove-mul-xai
 cargo run -p tfheprus-cli -- prove-sample-extract
 cargo run --release -p tfheprus-cli -- prove-glwe-keyswitch paper-v1
-cargo run --release -p tfheprus-cli -- prove-compact-root-keyswitch target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin
+cargo run --release -p tfheprus-cli -- prove-compact-root-keyswitch target/pbs-checkpoints-paper-v1-private-compact-current-c8/compact/root.bin <root-verifier-key-file> <trusted-root-key-fingerprint>
 cargo run -p tfheprus-cli -- prove-pbs-step paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-private paper-v1
 cargo run -p tfheprus-cli -- prove-pbs-step-chain paper-v1
@@ -134,7 +134,7 @@ cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 0 ta
 cargo run --release -p tfheprus-cli -- prove-pbs-chain-leaf-recursive toy 2 1 target/pbs-checkpoints/toy-leaf-1.bin
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaves-recursive target/pbs-checkpoints/toy-root.bin target/pbs-checkpoints/toy-leaf-0.bin target/pbs-checkpoints/toy-leaf-1.bin
 cargo run --release -p tfheprus-cli -- aggregate-pbs-chain-leaf-dir-recursive target/pbs-checkpoints/toy-root-from-dir.bin target/pbs-checkpoints 2
-cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin
+cargo run --release -p tfheprus-cli -- verify-pbs-chain-root-artifact-recursive target/pbs-checkpoints/toy-root.bin <root-verifier-key-file> <trusted-root-key-fingerprint>
 cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 shape
 cargo run --release -p tfheprus-cli -- profile-pbs-chain-leaf-cost paper-v1 8 prove
 cargo run --release -p tfheprus-cli -- profile-pbs-chain-compact-append paper-v1 8
@@ -428,6 +428,9 @@ noisy ciphertext values.
 
 ## Validation
 
+Historical benchmark commands above used the former metadata-only verification
+path. Use the authenticated command syntax below for external artifacts.
+
 The recursive prover uses the pinned upstream
 [`Plonky3/Plonky3-recursion`](https://github.com/Plonky3/Plonky3-recursion)
 submodule. Initialize it before building; the workspace Plonky3 dependencies
@@ -463,23 +466,55 @@ cargo test --release -p tfheprus-prover \
   proves_recursive_verifier_with_shared_fri_paths -- --ignored
 ```
 
-Regenerate a complete toy PBS root and its recursive key-switch artifact with:
+Generate a fresh toy checkpoint set and verifier keys from trusted code and trusted
+setup inputs (including the checkpoint directory):
 
 ```bash
 cargo run --release -p tfheprus-cli -- bench-pbs-chain-private-compact \
-  toy 2 4 target/pbs-checkpoints-toy-upstream-statement-bound
-cargo run --release -p tfheprus-cli -- prove-compact-root-keyswitch-recursive \
-  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root.bin \
-  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root-keyswitch-final.bin
-cargo run --release -p tfheprus-cli -- verify-compact-root-keyswitch-recursive \
-  target/pbs-checkpoints-toy-upstream-statement-bound/compact/root-keyswitch-final.bin
+  toy 2 4 target/pbs-checkpoints-toy-authenticated-v1
 ```
 
-The Statement-table run verified all eight toy PBS steps, a 219964-byte root
-with 31 public fields, and a 224700-byte final artifact with 40 public fields.
-The key-switched output message was `3`.
+Preparation writes a separate `<artifact>.vk` file and reports its SHA3-256
+fingerprint. Retain that fingerprint through a trusted channel. The `.vk.sha3`
+file is a setup convenience, not an authentication source when received alongside
+an untrusted artifact. A proof cannot supply its own trust anchor.
 
-Statement binding does not pin a trusted circuit relation: the existing legacy
-batch-verifier APIs still reconstruct AIRs and preprocessing from proof metadata.
-Standalone artifacts remain a PoC until verifier keys are independently retained
-and authenticated.
+Standalone verification requires the proof, candidate key file, and independently
+trusted fingerprint. For example, after recording the root fingerprint from your
+trusted setup as `ROOT_KEY_FINGERPRINT`:
+
+```bash
+cargo run --release -p tfheprus-cli -- verify-pbs-chain-compact-root-artifact-recursive \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root.bin \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root.bin.vk \
+  "$ROOT_KEY_FINGERPRINT"
+cargo run --release -p tfheprus-cli -- prove-compact-root-keyswitch-recursive \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root.bin \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root-keyswitch-final.bin \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root.bin.vk \
+  "$ROOT_KEY_FINGERPRINT"
+```
+
+The final proving command likewise reports a new key fingerprint. Retain it as
+`FINAL_KEY_FINGERPRINT`, then verify:
+
+```bash
+cargo run --release -p tfheprus-cli -- verify-compact-root-keyswitch-recursive \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root-keyswitch-final.bin \
+  target/pbs-checkpoints-toy-authenticated-v1/compact/root-keyswitch-final.bin.vk \
+  "$FINAL_KEY_FINGERPRINT"
+```
+
+Keys are derived from upstream's trusted `prepare_circuit` verifier, including the
+exact relation, statement schema, protocol parameters, preprocessing commitment,
+and matrix routing. Each recursive parent also pins every limb of its children's
+preprocessing caps as circuit constants. A key can verify new witnesses for the
+same circuit; a different circuit needs an explicitly authorized new key.
+
+For library consumers, load `VerifierKey::from_authenticated_bytes` with a
+separately provisioned `VerifierKeyFingerprint`, then call the root or final
+`verify_*_with_verifier_key` API. Proof deserialization never restores trusted
+verifier authority. Existing library verification APIs without that suffix remain
+legacy metadata-only checks for compatibility. Standalone CLI root/final commands
+have no such fallback and reject missing pins. Standalone frontier verification is
+disabled until a per-node authenticated key manifest is implemented.

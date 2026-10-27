@@ -5,6 +5,8 @@ mod poseidon_chain;
 mod range_check;
 mod recursive;
 mod statement_digest;
+mod verifier_key;
+pub use verifier_key::{VerifierKey, VerifierKeyFingerprint};
 
 use core::{fmt, ops::Range};
 use std::collections::BTreeMap;
@@ -829,11 +831,13 @@ pub enum ProofError {
     StatementMismatch,
     Plonky3(String),
     Serialization(String),
+    VerifierKey(String),
 }
 
 impl fmt::Display for ProofError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::VerifierKey(message) => write!(f, "verifier key error: {message}"),
             Self::StatementMismatch => write!(f, "proof does not match the requested statement"),
             Self::Plonky3(message) => write!(f, "plonky3 error: {message}"),
             Self::Serialization(message) => write!(f, "serialization error: {message}"),
@@ -1099,6 +1103,23 @@ pub fn prove_compact_pbs_root_keyswitch_recursive(
     })
 }
 
+/// Verify against an independently provisioned, authenticated circuit key.
+pub fn verify_compact_pbs_keyswitch_proof_with_verifier_key(
+    proof: &CompactPbsKeyswitchProof,
+    key: &VerifierKey,
+) -> Result<(), ProofError> {
+    if proof.summary.pbs.step_count != proof.summary.pbs.params.lwe_dimension
+        || proof.summary.output_lwe.len() != proof.summary.pbs.params.lwe_dimension + 1
+    {
+        return Err(ProofError::StatementMismatch);
+    }
+    proof
+        .aggregation
+        .verify_statement_with_key(&proof.summary.field_values(), key)
+}
+
+/// Legacy proof-metadata verification; external artifacts require
+/// `verify_compact_pbs_keyswitch_proof_with_verifier_key`.
 pub fn verify_compact_pbs_keyswitch_proof(
     proof: &CompactPbsKeyswitchProof,
 ) -> Result<(), ProofError> {
@@ -1969,6 +1990,21 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_chunk_tree_statement_proof(
     Ok(())
 }
 
+/// Verify a full root using independently authenticated verifier authority.
+pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(
+    summary: &ActualPbsChainSummary,
+    proof: &AggregatedRecursiveActualPbsChainRootProof,
+    key: &VerifierKey,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    proof
+        .root
+        .verify_statement_with_key(&summary.field_values(), key)
+}
+
+/// Legacy proof-metadata verification; use the `_with_verifier_key` variant for external artifacts.
 pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
     summary: &ActualPbsChainSummary,
     proof: &AggregatedRecursiveActualPbsChainRootProof,
@@ -1982,6 +2018,21 @@ pub fn verify_aggregated_recursive_actual_pbs_chain_root_summary_proof(
     )
 }
 
+/// Verify a compact root using independently authenticated verifier authority.
+pub fn verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(
+    summary: &CompactActualPbsChainSummary,
+    proof: &CompactAggregatedRecursiveActualPbsChainRootProof,
+    key: &VerifierKey,
+) -> Result<(), ProofError> {
+    if &proof.chain_summary != summary {
+        return Err(ProofError::StatementMismatch);
+    }
+    proof
+        .root
+        .verify_statement_with_key(&summary.field_values(), key)
+}
+
+/// Legacy proof-metadata verification; use the `_with_verifier_key` variant for external artifacts.
 pub fn verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
     summary: &CompactActualPbsChainSummary,
     proof: &CompactAggregatedRecursiveActualPbsChainRootProof,
@@ -3407,6 +3458,10 @@ mod tests {
         let first_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&first).unwrap();
         let second_leaf = prove_private_compact_recursive_actual_pbs_chain_chunk(&second).unwrap();
 
+        assert_eq!(
+            first_leaf.recursion.verifier_key().unwrap().fingerprint(),
+            second_leaf.recursion.verifier_key().unwrap().fingerprint()
+        );
         assert_eq!(
             first_leaf.recursion.public_input_count(),
             first_leaf.chain_summary.field_values().len()

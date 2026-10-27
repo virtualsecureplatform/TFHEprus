@@ -29,6 +29,7 @@ postcard.workspace = true
 rand.workspace = true
 rand_p3 = { package = "rand", version = "0.10.0", default-features = false }
 serde.workspace = true
+sha3.workspace = true
 
 [dev-dependencies]
 rand_chacha.workspace = true

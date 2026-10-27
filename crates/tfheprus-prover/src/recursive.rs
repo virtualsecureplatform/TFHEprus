@@ -1,17 +1,15 @@
 use core::ops::Range;
 
-use p3_batch_stark::ProverData;
 use p3_circuit::ops::{
     generate_poseidon2_trace, generate_recompose_trace, GoldilocksD2Width8, Op, Poseidon2Config,
 };
 
 use p3_circuit::{Circuit, CircuitBuilder, ExprId};
-use p3_circuit_prover::common::get_airs_and_degrees_with_prep;
 use p3_circuit_prover::config::GoldilocksConfig;
 use p3_circuit_prover::{
     poseidon2_air_builders_for_configs, poseidon2_preprocessor, recompose_air_builders,
     recompose_preprocessor, recompose_table_provers, BatchStarkProof, BatchStarkProver,
-    CircuitProverData, ConstraintProfile, Poseidon2ProverD2, TablePacking, TableProver,
+    ConstraintProfile, Poseidon2ProverD2, PreparedCircuitProver, TablePacking, TableProver,
     NUM_PRIMITIVE_TABLES,
 };
 use p3_field::extension::BinomialExtensionField;
@@ -25,7 +23,7 @@ use p3_recursion::pcs::{
     RecExtensionValMmcs, RecValMmcs,
 };
 use p3_recursion::public_inputs::BatchStarkVerifierInputsBuilder;
-use p3_recursion::verifier::{verify_p3_batch_proof_circuit, VerificationError};
+use p3_recursion::verifier::VerificationError;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use tfheprus_circuits::SELECTOR_DIGEST_WIDTH;
 
@@ -61,6 +59,7 @@ type NativeVerifierInputs =
 struct VerifierInputs {
     native: NativeVerifierInputs,
     statement: Vec<ExprId>,
+    preprocessing_pins: Vec<(usize, Challenge)>,
 }
 
 impl core::ops::Deref for VerifierInputs {
@@ -69,6 +68,8 @@ impl core::ops::Deref for VerifierInputs {
         &self.native
     }
 }
+
+use crate::VerifierKey;
 
 const COMPACT_ACCUMULATOR_DIGEST_TAG: u64 = 0x676c_7765_5f61_6363;
 
@@ -100,15 +101,41 @@ pub(crate) struct PbsKeyswitchLinkLayout {
 pub struct RecursiveBatchProof {
     public_inputs: Vec<Challenge>,
     proof: BatchStarkProof<GoldilocksConfig>,
+    #[serde(skip)]
+    verifier_key: Option<VerifierKey>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct AggregatedRecursiveBatchProof {
     public_inputs: Vec<Challenge>,
     proof: BatchStarkProof<GoldilocksConfig>,
+    #[serde(skip)]
+    verifier_key: Option<VerifierKey>,
 }
 
 impl RecursiveBatchProof {
+    /// Key retained from local trusted circuit preparation, never decoded from a proof.
+    pub fn verifier_key(&self) -> Result<&VerifierKey, ProofError> {
+        self.verifier_key.as_ref().ok_or_else(|| {
+            ProofError::VerifierKey(
+                "proof has no independently retained key; supply an authenticated key file".into(),
+            )
+        })
+    }
+    pub fn verify_with_verifier_key(&self, key: &VerifierKey) -> Result<(), ProofError> {
+        key.verify(&self.proof, &statement_values(&self.public_inputs)?)
+    }
+
+    pub fn verify_statement_with_key(
+        &self,
+        expected: &[F],
+        key: &VerifierKey,
+    ) -> Result<(), ProofError> {
+        if self.public_inputs != summary_public_inputs(expected) {
+            return Err(ProofError::StatementMismatch);
+        }
+        key.verify(&self.proof, expected)
+    }
     pub(crate) fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
         &self.proof
     }
@@ -131,6 +158,28 @@ impl RecursiveBatchProof {
 }
 
 impl AggregatedRecursiveBatchProof {
+    /// Key retained from local trusted circuit preparation, never decoded from a proof.
+    pub fn verifier_key(&self) -> Result<&VerifierKey, ProofError> {
+        self.verifier_key.as_ref().ok_or_else(|| {
+            ProofError::VerifierKey(
+                "proof has no independently retained key; supply an authenticated key file".into(),
+            )
+        })
+    }
+    pub fn verify_with_verifier_key(&self, key: &VerifierKey) -> Result<(), ProofError> {
+        key.verify(&self.proof, &statement_values(&self.public_inputs)?)
+    }
+
+    pub fn verify_statement_with_key(
+        &self,
+        expected: &[F],
+        key: &VerifierKey,
+    ) -> Result<(), ProofError> {
+        if self.public_inputs != summary_public_inputs(expected) {
+            return Err(ProofError::StatementMismatch);
+        }
+        key.verify(&self.proof, expected)
+    }
     pub(crate) fn batch_proof(&self) -> &BatchStarkProof<GoldilocksConfig> {
         &self.proof
     }
@@ -185,29 +234,15 @@ pub(crate) fn prove_recursive_batch_with_leaf_summary(
         ProofError::Plonky3(format!("run recursive verifier circuit: {error:?}"))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, outer_config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(outer_config, table_packing, summary.len());
-    let recursive_proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let recursive_proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(RecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(summary),
         proof: recursive_proof,
     })
@@ -248,29 +283,15 @@ pub(crate) fn prove_private_recursive_batch_with_leaf_summary(
         ProofError::Plonky3(format!("run private recursive verifier circuit: {error:?}"))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, outer_config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(outer_config, table_packing, summary.len());
-    let recursive_proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let recursive_proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(RecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(summary),
         proof: recursive_proof,
     })
@@ -323,29 +344,15 @@ pub(crate) fn prove_private_recursive_batch_with_compact_leaf_summary(
         ))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, outer_config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(outer_config, table_packing, summary.len());
-    let recursive_proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let recursive_proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(RecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(summary),
         proof: recursive_proof,
     })
@@ -355,8 +362,7 @@ pub(crate) struct PrivateCompactLeafRecursionProver {
     verification_circuit: Circuit<Challenge>,
     verifier_inputs: VerifierInputs,
     mmcs_op_ids: Vec<p3_circuit::NonPrimitiveOpId>,
-    table_packing: TablePacking,
-    circuit_prover_data: CircuitProverData<GoldilocksConfig>,
+    circuit_prover_data: PreparedCircuitProver<GoldilocksConfig>,
 }
 
 impl PrivateCompactLeafRecursionProver {
@@ -379,28 +385,13 @@ impl PrivateCompactLeafRecursionProver {
                 full_layout,
                 compact_layout,
             )?;
-        let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-        let air_builders = recursive_verifier_air_builders(&verification_circuit);
-        let (airs_degrees, primitive_columns, non_primitive_columns) =
-            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-                &verification_circuit,
-                &table_packing,
-                &preprocessors,
-                &air_builders,
-                ConstraintProfile::Standard,
-            )
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-        let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&outer_config, &airs, &degrees)
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let circuit_prover_data =
-            CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+            prepare_recursive_prover(&verification_circuit, outer_config, table_packing.clone())?;
 
         Ok(Self {
             verification_circuit,
             verifier_inputs,
             mmcs_op_ids,
-            table_packing,
             circuit_prover_data,
         })
     }
@@ -443,16 +434,15 @@ impl PrivateCompactLeafRecursionProver {
             ))
         })?;
 
-        let prover = recursive_verifier_prover(
-            goldilocks_config(),
-            self.table_packing.clone(),
-            summary.len(),
-        );
-        let recursive_proof = prover
-            .prove_all_tables(&traces, &self.circuit_prover_data)
+        let recursive_proof = self
+            .circuit_prover_data
+            .prove(&traces)
             .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
         Ok(RecursiveBatchProof {
+            verifier_key: Some(VerifierKey::from_prepared(
+                self.circuit_prover_data.verifier(),
+            )?),
             public_inputs: summary_public_inputs(summary),
             proof: recursive_proof,
         })
@@ -465,8 +455,7 @@ pub(crate) struct PrivateCompactAppendRecursionProver {
     chunk_inputs: VerifierInputs,
     previous_mmcs_op_ids: Vec<p3_circuit::NonPrimitiveOpId>,
     chunk_mmcs_op_ids: Vec<p3_circuit::NonPrimitiveOpId>,
-    table_packing: TablePacking,
-    circuit_prover_data: CircuitProverData<GoldilocksConfig>,
+    circuit_prover_data: PreparedCircuitProver<GoldilocksConfig>,
 }
 
 impl PrivateCompactAppendRecursionProver {
@@ -494,22 +483,8 @@ impl PrivateCompactAppendRecursionProver {
             full_layout,
             compact_layout,
         )?;
-        let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-        let air_builders = recursive_verifier_air_builders(&verification_circuit);
-        let (airs_degrees, primitive_columns, non_primitive_columns) =
-            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-                &verification_circuit,
-                &table_packing,
-                &preprocessors,
-                &air_builders,
-                ConstraintProfile::Standard,
-            )
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-        let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-        let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
-            .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
         let circuit_prover_data =
-            CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+            prepare_recursive_prover(&verification_circuit, config, table_packing.clone())?;
 
         Ok(Self {
             verification_circuit,
@@ -517,7 +492,6 @@ impl PrivateCompactAppendRecursionProver {
             chunk_inputs,
             previous_mmcs_op_ids,
             chunk_mmcs_op_ids,
-            table_packing,
             circuit_prover_data,
         })
     }
@@ -580,16 +554,15 @@ impl PrivateCompactAppendRecursionProver {
             ))
         })?;
 
-        let prover = recursive_verifier_prover(
-            goldilocks_config(),
-            self.table_packing.clone(),
-            summary.len(),
-        );
-        let proof = prover
-            .prove_all_tables(&traces, &self.circuit_prover_data)
+        let proof = self
+            .circuit_prover_data
+            .prove(&traces)
             .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
         Ok(AggregatedRecursiveBatchProof {
+            verifier_key: Some(VerifierKey::from_prepared(
+                self.circuit_prover_data.verifier(),
+            )?),
             public_inputs: summary_public_inputs(summary),
             proof,
         })
@@ -597,6 +570,9 @@ impl PrivateCompactAppendRecursionProver {
 }
 
 pub fn verify_recursive_batch(proof: &RecursiveBatchProof) -> Result<(), ProofError> {
+    if let Some(key) = &proof.verifier_key {
+        return proof.verify_with_verifier_key(key);
+    }
     verify_bound_recursive_statement(&proof.proof, &proof.public_inputs)
 }
 
@@ -675,29 +651,15 @@ pub(crate) fn prove_aggregate_batch_proofs_with_chain_summary(
         ProofError::Plonky3(format!("run aggregate verifier circuit: {error:?}"))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(config, table_packing, summary.len());
-    let proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(AggregatedRecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(summary),
         proof,
     })
@@ -758,29 +720,15 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_chain_summary(
         ProofError::Plonky3(format!("run private aggregate verifier circuit: {error:?}"))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(config, table_packing, summary.len());
-    let proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(AggregatedRecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(summary),
         proof,
     })
@@ -875,29 +823,15 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
         ))
     })?;
 
-    let preprocessors = recursive_verifier_preprocessors(&verification_circuit);
-    let air_builders = recursive_verifier_air_builders(&verification_circuit);
-    let (airs_degrees, primitive_columns, non_primitive_columns) =
-        get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-            &verification_circuit,
-            &table_packing,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
-    let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-    let prover_data = ProverData::from_airs_and_degrees(&config, &airs, &degrees)
-        .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
     let circuit_prover_data =
-        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+        prepare_recursive_prover(&verification_circuit, config, table_packing.clone())?;
 
-    let prover = recursive_verifier_prover(config, table_packing, final_summary.len());
-    let proof = prover
-        .prove_all_tables(&traces, &circuit_prover_data)
+    let proof = circuit_prover_data
+        .prove(&traces)
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
 
     Ok(AggregatedRecursiveBatchProof {
+        verifier_key: Some(VerifierKey::from_prepared(circuit_prover_data.verifier())?),
         public_inputs: summary_public_inputs(final_summary),
         proof,
     })
@@ -906,6 +840,9 @@ pub(crate) fn prove_private_aggregate_batch_proofs_with_pbs_keyswitch_link(
 pub fn verify_aggregated_recursive_batch(
     proof: &AggregatedRecursiveBatchProof,
 ) -> Result<(), ProofError> {
+    if let Some(key) = &proof.verifier_key {
+        return proof.verify_with_verifier_key(key);
+    }
     verify_bound_recursive_statement(&proof.proof, &proof.public_inputs)
 }
 
@@ -975,9 +912,10 @@ fn build_verifier_circuit_with_leaf_summary(
         summary,
         chunk_public_offset,
     )?;
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&verifier_inputs])?;
 
     Ok((circuit, verifier_inputs, mmcs_op_ids))
 }
@@ -1016,9 +954,10 @@ fn build_private_verifier_circuit_with_leaf_summary(
         summary,
         chunk_public_offset,
     )?;
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&verifier_inputs])?;
 
     Ok((circuit, verifier_inputs, mmcs_op_ids))
 }
@@ -1061,9 +1000,10 @@ fn build_private_verifier_circuit_with_compact_leaf_summary(
         full_layout,
         compact_layout,
     )?;
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&verifier_inputs])?;
 
     Ok((circuit, verifier_inputs, mmcs_op_ids))
 }
@@ -1122,9 +1062,10 @@ fn build_private_append_verifier_circuit_with_compact_chunk_summary(
         &summary_targets,
         compact_layout,
     )?;
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&previous_inputs, &chunk_inputs])?;
 
     Ok((
         circuit,
@@ -1181,9 +1122,10 @@ fn build_aggregation_verifier_circuit_with_chain_summary(
             layout,
         )?;
     }
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&left_inputs, &right_inputs])?;
 
     Ok((
         circuit,
@@ -1234,9 +1176,10 @@ fn build_private_aggregation_verifier_circuit_with_chain_summary(
             layout,
         )?;
     }
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&left_inputs, &right_inputs])?;
 
     Ok((
         circuit,
@@ -1289,9 +1232,10 @@ fn build_private_aggregation_verifier_circuit_with_pbs_keyswitch_link(
         &summary_targets,
         layout,
     )?;
-    let circuit = builder
+    let mut circuit = builder
         .build()
         .map_err(|error| ProofError::Plonky3(format!("{error:?}")))?;
+    pin_child_preprocessing(&mut circuit, &[&root_inputs, &key_switch_inputs])?;
 
     Ok((
         circuit,
@@ -1895,8 +1839,56 @@ fn add_batch_verifier_to_builder_with_degree<const D: usize>(
     table_provers: &[Box<dyn TableProver<GoldilocksConfig>>],
     fri_params: &p3_recursion::FriVerifierParams,
 ) -> Result<(VerifierInputs, Vec<p3_circuit::NonPrimitiveOpId>), ProofError> {
-    let lookup_gadget = LogUpGadget;
-    verify_p3_batch_proof_circuit::<
+    use p3_batch_stark::StarkGenericConfig;
+    use p3_circuit_prover::batch_stark_prover::lookups_for_circuit_table_air;
+    use p3_recursion::traits::Recursive;
+    use p3_recursion::types::CommonDataTargets;
+    use p3_recursion::verifier::{
+        reconstruct_batch_tables, verify_batch_circuit, CircuitTablesAir,
+    };
+
+    let tables = reconstruct_batch_tables::<GoldilocksConfig, D>(config, proof, table_provers)
+        .map_err(map_recursion_error)?;
+    let counts: Vec<_> = tables.public_values.iter().map(Vec::len).collect();
+    let mut native =
+        NativeVerifierInputs::allocate(builder, &proof.proof, &proof.stark_common, &counts)
+            .map_err(map_recursion_error)?;
+    // Upstream allocate() ends with CommonDataTargets. The complete public
+    // encoding is checked against the allocated width before any verifier work.
+    let common_values = <CommonDataTargets<GoldilocksConfig, MerkleCapTargets<F, 4>> as Recursive<Challenge>>::get_values(&proof.stark_common);
+    let public_end = builder.public_input_count();
+    let public_start = public_end
+        .checked_sub(common_values.len())
+        .ok_or(ProofError::StatementMismatch)?;
+    let preprocessing_pins = (public_start..public_end).zip(common_values).collect();
+    native.common_data.lookups = tables
+        .airs
+        .iter()
+        .zip(&tables.trace_lens)
+        .map(|(air, &len)| {
+            lookups_for_circuit_table_air::<GoldilocksConfig, D>(
+                &match air {
+                    CircuitTablesAir::Const(a) => {
+                        p3_circuit_prover::common::CircuitTableAir::Const(a.clone())
+                    }
+                    CircuitTablesAir::Public(a) => {
+                        p3_circuit_prover::common::CircuitTableAir::Public(a.clone())
+                    }
+                    CircuitTablesAir::Alu(a) => {
+                        p3_circuit_prover::common::CircuitTableAir::Alu(a.clone())
+                    }
+                    CircuitTablesAir::Dynamic(a) => {
+                        p3_circuit_prover::common::CircuitTableAir::Dynamic(a.clone())
+                    }
+                },
+                len,
+                config.is_zk(),
+            )
+            .to_vec()
+        })
+        .collect();
+    let op_ids = verify_batch_circuit::<
+        CircuitTablesAir<GoldilocksConfig, D>,
         GoldilocksConfig,
         MerkleCapTargets<F, 4>,
         InputProofTargets<F, Challenge, RecValMmcs<F, 4, MyHash, MyCompress>>,
@@ -1905,22 +1897,62 @@ fn add_batch_verifier_to_builder_with_degree<const D: usize>(
         Poseidon2Config,
         8,
         4,
-        D,
     >(
         config,
+        &tables.airs,
         builder,
-        proof,
+        &native.proof_targets,
+        &native.air_public_targets,
         fri_params,
-        &proof.stark_common,
-        &lookup_gadget,
+        &native.common_data,
+        &LogUpGadget,
         Poseidon2Config::GOLDILOCKS_D2_W8,
-        table_provers,
     )
-    .map_err(map_recursion_error)
-    .and_then(|(native, op_ids)| {
-        let statement = native.air_public_targets[statement_table_index(proof)?].clone();
-        Ok((VerifierInputs { native, statement }, op_ids))
-    })
+    .map_err(map_recursion_error)?;
+    if builder.public_input_count() != public_end {
+        return Err(ProofError::StatementMismatch);
+    }
+    let statement = native.air_public_targets[statement_table_index(proof)?].clone();
+    Ok((
+        VerifierInputs {
+            native,
+            statement,
+            preprocessing_pins,
+        },
+        op_ids,
+    ))
+}
+
+// Replace only the child preprocessing input creators with constants before
+// preparing the parent's key. This keeps the witness packing layout unchanged,
+// while the committed Const AIR fixes every cap root and limb in the parent.
+fn pin_child_preprocessing(
+    circuit: &mut Circuit<Challenge>,
+    children: &[&VerifierInputs],
+) -> Result<(), ProofError> {
+    for inputs in children {
+        for &(position, value) in &inputs.preprocessing_pins {
+            let expected_wid = *circuit
+                .public_rows
+                .get(position)
+                .ok_or(ProofError::StatementMismatch)?;
+            let mut count = 0;
+            for op in &mut circuit.ops {
+                if matches!(op, Op::Public { out, public_pos } if *public_pos == position && *out == expected_wid)
+                {
+                    *op = Op::Const {
+                        out: expected_wid,
+                        val: value,
+                    };
+                    count += 1;
+                }
+            }
+            if count != 1 {
+                return Err(ProofError::StatementMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn add_private_batch_verifier_to_builder_with_degree<const D: usize>(
@@ -1945,6 +1977,30 @@ fn enable_recursive_verifier_ops(builder: &mut CircuitBuilder<Challenge>) {
         goldilocks_poseidon2_8(),
     );
     builder.enable_recompose::<F>(generate_recompose_trace::<F, Challenge>);
+}
+
+fn prepare_recursive_prover(
+    circuit: &Circuit<Challenge>,
+    config: GoldilocksConfig,
+    packing: TablePacking,
+) -> Result<PreparedCircuitProver<GoldilocksConfig>, ProofError> {
+    let preprocessors = recursive_verifier_preprocessors(circuit);
+    let builders = recursive_verifier_air_builders(circuit);
+    recursive_verifier_prover(
+        config,
+        packing,
+        circuit
+            .statement_schema()
+            .ok_or(ProofError::StatementMismatch)?
+            .base_len(),
+    )
+    .prepare_circuit::<Challenge, 2>(
+        circuit,
+        &preprocessors,
+        &builders,
+        ConstraintProfile::Standard,
+    )
+    .map_err(|error| ProofError::Plonky3(format!("{error:?}")))
 }
 
 fn recursive_verifier_prover(
@@ -2245,12 +2301,9 @@ fn statement_table_index(proof: &BatchStarkProof<GoldilocksConfig>) -> Result<us
     Ok(indices[0])
 }
 
-fn verify_bound_recursive_statement(
-    proof: &BatchStarkProof<GoldilocksConfig>,
-    inputs: &[Challenge],
-) -> Result<(), ProofError> {
+fn statement_values(inputs: &[Challenge]) -> Result<Vec<F>, ProofError> {
     use p3_field::BasedVectorSpace;
-    let values = inputs
+    inputs
         .iter()
         .map(|value| {
             let coeffs = value.as_basis_coefficients_slice();
@@ -2259,7 +2312,14 @@ fn verify_bound_recursive_statement(
             }
             Ok(coeffs[0])
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn verify_bound_recursive_statement(
+    proof: &BatchStarkProof<GoldilocksConfig>,
+    inputs: &[Challenge],
+) -> Result<(), ProofError> {
+    let values = statement_values(inputs)?;
     let index = statement_table_index(proof)? - NUM_PRIMITIVE_TABLES;
     if proof.non_primitives[index].public_values != values {
         return Err(ProofError::StatementMismatch);
@@ -2314,23 +2374,108 @@ mod tests {
         .unwrap();
         let traces = runner.run().unwrap();
 
-        let packing = proof_table_packing();
-        let (airs_degrees, primitive_columns, non_primitive_columns) =
-            get_airs_and_degrees_with_prep::<GoldilocksConfig, _, 2>(
-                &circuit,
-                &packing,
-                &recursive_verifier_preprocessors(&circuit),
-                &recursive_verifier_air_builders(&circuit),
-                ConstraintProfile::Standard,
+        let prepared =
+            prepare_recursive_prover(&circuit, goldilocks_config(), proof_table_packing()).unwrap();
+        let trusted_key = VerifierKey::from_prepared(prepared.verifier()).unwrap();
+        let encoded = trusted_key.to_bytes();
+        let pin = trusted_key.fingerprint();
+        let imported = VerifierKey::from_authenticated_bytes(&encoded, &pin).unwrap();
+        let mut proof = prepared.prove(&traces).unwrap();
+        let statement_values = base.public_inputs.clone();
+        imported.verify(&proof, &statement_values).unwrap();
+        assert_eq!(
+            pin.to_string()
+                .parse::<crate::VerifierKeyFingerprint>()
+                .unwrap(),
+            pin
+        );
+        let mut changed_key = encoded.clone();
+        changed_key[0] ^= 1;
+        assert!(VerifierKey::from_authenticated_bytes(&changed_key, &pin).is_err());
+
+        // Matching table shapes alone are insufficient: changing only a pinned
+        // constant changes the key and must reject the original valid proof.
+        let mut altered_circuit = circuit.clone();
+        let pin_position = inputs.preprocessing_pins[0].0;
+        let pin_wid = altered_circuit.public_rows[pin_position];
+        let mut altered = false;
+        for op in &mut altered_circuit.ops {
+            if let Op::Const { out, val } = op {
+                if *out == pin_wid {
+                    *val += Challenge::ONE;
+                    altered = true;
+                    break;
+                }
+            }
+        }
+        assert!(altered);
+        let altered_prepared =
+            prepare_recursive_prover(&altered_circuit, goldilocks_config(), proof_table_packing())
+                .unwrap();
+        let altered_key = VerifierKey::from_prepared(altered_prepared.verifier()).unwrap();
+        assert_ne!(altered_key.fingerprint(), pin);
+        assert!(altered_key.verify(&proof, &statement_values).is_err());
+
+        // A valid proof for a different program, with the identical public statement,
+        // must be rejected by the independently retained key.
+        let mut foreign_builder = CircuitBuilder::<Challenge>::new();
+        enable_recursive_verifier_ops(&mut foreign_builder);
+        let exports: Vec<_> = (0..statement_values.len())
+            .map(|_| p3_circuit::StatementExport::Base(foreign_builder.public_input()))
+            .collect();
+        foreign_builder
+            .set_statement_exports::<F>(&exports)
+            .unwrap();
+        let foreign_circuit = foreign_builder.build().unwrap();
+        let foreign_prepared =
+            prepare_recursive_prover(&foreign_circuit, goldilocks_config(), proof_table_packing())
+                .unwrap();
+        let foreign_key = VerifierKey::from_prepared(foreign_prepared.verifier()).unwrap();
+        let mut foreign_runner = foreign_circuit.runner();
+        foreign_runner
+            .set_public_inputs(&summary_public_inputs(&statement_values))
+            .unwrap();
+        let foreign_proof = foreign_prepared
+            .prove(&foreign_runner.run().unwrap())
+            .unwrap();
+        foreign_key
+            .verify(&foreign_proof, &statement_values)
+            .unwrap();
+        assert!(imported.verify(&foreign_proof, &statement_values).is_err());
+        assert!(VerifierKey::from_authenticated_bytes(&foreign_key.to_bytes(), &pin).is_err());
+
+        // Every root/limb in the child cap is fixed by parent preprocessing.
+        for &(position, _) in [
+            inputs.preprocessing_pins.first().unwrap(),
+            inputs.preprocessing_pins.last().unwrap(),
+        ] {
+            let mut changed_public = public.clone();
+            changed_public[position] += Challenge::ONE;
+            let mut changed_runner = circuit.runner();
+            changed_runner.set_public_inputs(&changed_public).unwrap();
+            changed_runner.set_private_inputs(&private).unwrap();
+            set_proof_fri_private_data(
+                &mut changed_runner,
+                &op_ids,
+                &base.proof,
+                base_fri_verifier_params(),
             )
             .unwrap();
-        let (airs, degrees): (Vec<_>, Vec<_>) = airs_degrees.into_iter().unzip();
-        let config = goldilocks_config();
-        let data = ProverData::from_airs_and_degrees(&config, &airs, &degrees).unwrap();
-        let data = CircuitProverData::new(data, primitive_columns, non_primitive_columns);
-        let prover = recursive_verifier_prover(config, packing, base.public_inputs.len());
-        let mut proof = prover.prove_all_tables(&traces, &data).unwrap();
-        prover.verify_all_tables::<Challenge>(&proof).unwrap();
+            assert!(changed_runner.run().is_err());
+        }
+
+        // Proof transport cannot mint verifier authority by itself.
+        let transport = RecursiveBatchProof {
+            public_inputs: summary_public_inputs(&statement_values),
+            proof: postcard::from_bytes(&postcard::to_allocvec(&proof).unwrap()).unwrap(),
+            verifier_key: Some(trusted_key),
+        };
+        let decoded: RecursiveBatchProof =
+            postcard::from_bytes(&postcard::to_allocvec(&transport).unwrap()).unwrap();
+        assert!(decoded.verifier_key().is_err());
+        decoded
+            .verify_statement_with_key(&statement_values, &imported)
+            .unwrap();
 
         let statement = summary_public_inputs(&base.public_inputs);
         verify_bound_recursive_statement(&proof, &statement).unwrap();

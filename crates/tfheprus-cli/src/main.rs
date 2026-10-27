@@ -95,20 +95,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Some("prove-compact-root-keyswitch") => prove_compact_root_keyswitch_demo(
             parse_required_arg(&args, 2, "compact root artifact")?,
+            parse_required_arg(&args, 3, "root verifier key file")?,
+            parse_required_arg(&args, 4, "independently trusted root key fingerprint")?,
         )?,
         Some("prove-compact-root-keyswitch-recursive") => {
             prove_compact_root_keyswitch_recursive_demo(
                 parse_required_arg(&args, 2, "compact root artifact")?,
                 parse_required_arg(&args, 3, "final recursive artifact")?,
+                parse_required_arg(&args, 4, "root verifier key file")?,
+                parse_required_arg(&args, 5, "independently trusted root key fingerprint")?,
             )?
         }
-        Some("verify-compact-root-keyswitch-recursive") => {
-            verify_compact_root_keyswitch_recursive_demo(parse_required_arg(
-                &args,
-                2,
-                "final recursive artifact",
-            )?)?
-        }
+        Some("verify-compact-root-keyswitch-recursive") => verify_authenticated_artifact(
+            "final", parse_required_arg(&args, 2, "proof artifact")?,
+            parse_required_arg(&args, 3, "verifier key file")?,
+            parse_required_arg(&args, 4, "independently trusted verifier-key fingerprint")?,
+        )?,
         Some("prove-keccak-f1600") => prove_keccak_f1600_demo()?,
         Some("prove-actual-pbs") => prove_actual_pbs_demo(parse_prove_preset_arg(&args)?)?,
         Some("prove-pbs-step") => prove_pbs_step_demo(parse_preset_arg(&args)?)?,
@@ -243,27 +245,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 parse_required_arg(&args, 3, "aggregate artifact directory")?,
             )?
         }
-        Some("verify-pbs-chain-root-artifact-recursive") => {
-            verify_pbs_chain_root_artifact_recursive_demo(parse_required_arg(
-                &args,
-                2,
-                "root artifact path",
-            )?)?
-        }
-        Some("verify-pbs-chain-compact-root-artifact-recursive") => {
-            verify_pbs_chain_compact_root_artifact_recursive_demo(parse_required_arg(
-                &args,
-                2,
-                "root artifact path",
-            )?)?
-        }
-        Some("verify-pbs-chain-frontier-artifact-recursive") => {
-            verify_pbs_chain_frontier_artifact_recursive_demo(parse_required_arg(
-                &args,
-                2,
-                "frontier artifact path",
-            )?)?
-        }
+        Some("verify-pbs-chain-root-artifact-recursive") => verify_authenticated_artifact(
+            "full", parse_required_arg(&args, 2, "proof artifact")?,
+            parse_required_arg(&args, 3, "verifier key file")?,
+            parse_required_arg(&args, 4, "independently trusted verifier-key fingerprint")?,
+        )?,
+        Some("verify-pbs-chain-compact-root-artifact-recursive") => verify_authenticated_artifact(
+            "compact", parse_required_arg(&args, 2, "proof artifact")?,
+            parse_required_arg(&args, 3, "verifier key file")?,
+            parse_required_arg(&args, 4, "independently trusted verifier-key fingerprint")?,
+        )?,
+        Some("verify-pbs-chain-frontier-artifact-recursive") => return Err("frontier verification requires per-node authenticated keys; verify individual root artifacts with an explicit key file and fingerprint".into()),
         Some("inspect-pbs-chain-artifact") => inspect_pbs_chain_artifact_demo(
             parse_required_arg(&args, 2, "artifact kind")?,
             parse_required_arg(&args, 3, "artifact path")?,
@@ -511,14 +503,20 @@ fn glwe_keyswitch_instance_from_params(
     (params, sk, instance)
 }
 
-fn prove_compact_root_keyswitch_demo(root_artifact_path: &str) -> Result<(), Box<dyn Error>> {
+fn prove_compact_root_keyswitch_demo(
+    root_artifact_path: &str,
+    key_path: &str,
+    pin: &str,
+) -> Result<(), Box<dyn Error>> {
+    let key = load_authenticated_key(key_path, pin)?;
     let root_bytes = fs::read(root_artifact_path)?;
     let root_proof =
         deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&root_bytes)?;
     let root_summary = root_proof.chain_summary.clone();
-    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+    tfheprus_prover::verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(
         &root_summary,
         &root_proof,
+        &key,
     )?;
     if root_summary.step_count != root_summary.params.lwe_dimension {
         return Err(format!(
@@ -576,14 +574,18 @@ fn prove_compact_root_keyswitch_demo(root_artifact_path: &str) -> Result<(), Box
 fn prove_compact_root_keyswitch_recursive_demo(
     root_artifact_path: &str,
     final_artifact_path: &str,
+    root_key_path: &str,
+    root_key_pin: &str,
 ) -> Result<(), Box<dyn Error>> {
+    let root_key = load_authenticated_key(root_key_path, root_key_pin)?;
     let root_bytes = fs::read(root_artifact_path)?;
     let root_proof =
         deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&root_bytes)?;
     let root_summary = root_proof.chain_summary.clone();
-    verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof(
+    tfheprus_prover::verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(
         &root_summary,
         &root_proof,
+        &root_key,
     )?;
     if root_summary.step_count != root_summary.params.lwe_dimension {
         return Err(format!(
@@ -618,6 +620,10 @@ fn prove_compact_root_keyswitch_recursive_demo(
         }
     }
     fs::write(final_artifact_path, &final_bytes)?;
+    write_verifier_key(
+        Path::new(final_artifact_path),
+        final_proof.aggregation.verifier_key()?,
+    )?;
     let decoded = deserialize_compact_pbs_keyswitch_proof(&final_bytes)?;
     verify_compact_pbs_keyswitch_proof(&decoded)?;
 
@@ -635,30 +641,6 @@ fn prove_compact_root_keyswitch_recursive_demo(
         verify_time.as_millis(),
         verify_time.as_micros(),
         instance.output.decrypt(&params, &sk.input_lwe)
-    );
-
-    Ok(())
-}
-
-fn verify_compact_root_keyswitch_recursive_demo(
-    final_artifact_path: &str,
-) -> Result<(), Box<dyn Error>> {
-    let bytes = fs::read(final_artifact_path)?;
-    let proof = deserialize_compact_pbs_keyswitch_proof(&bytes)?;
-    let verify_started = Instant::now();
-    verify_compact_pbs_keyswitch_proof(&proof)?;
-    let verify_time = verify_started.elapsed();
-
-    println!(
-        "compact-root plus glwe-keyswitch recursive artifact verified: artifact={}, artifact_bytes={}, params_n={}, total_steps={}, final_public_inputs={}, output_lwe_fields={}, verify_ms={}, verify_us={}",
-        final_artifact_path,
-        bytes.len(),
-        proof.summary.pbs.params.lwe_dimension,
-        proof.summary.pbs.step_count,
-        proof.public_input_count(),
-        proof.summary.output_lwe.len(),
-        verify_time.as_millis(),
-        verify_time.as_micros()
     );
 
     Ok(())
@@ -1474,6 +1456,7 @@ fn prove_pbs_chain_leaf_recursive_artifact_demo(
 
     let artifact = serialize_recursive_actual_pbs_chain_chunk_proof(&proof)?;
     fs::write(output_path, &artifact)?;
+    write_verifier_key(Path::new(output_path), proof.recursion.verifier_key()?)?;
 
     println!(
         "pbs-chain recursive leaf artifact written: preset={}, private_recursive={}, chunk_steps={}, chunk_index={}, steps={}..{}, artifact={}, artifact_bytes={}, instance_ms={}, instance_us={}, prove_ms={}, prove_us={}, verify_ms={}, verify_us={}, base_private_inputs={}, recursive_public_inputs={}, chain_summary_fields={}",
@@ -1625,6 +1608,7 @@ fn prove_pbs_chain_leaves_recursive_artifacts_demo(
             };
             let artifact = serialize_recursive_actual_pbs_chain_chunk_proof(&proof)?;
             fs::write(&artifact_path, &artifact)?;
+            write_verifier_key(&artifact_path, proof.recursion.verifier_key()?)?;
             (proof, artifact.len(), "written", prove_time, verify_time)
         };
 
@@ -1817,6 +1801,7 @@ fn prove_pbs_chain_private_compact_leaves_recursive_artifacts_demo(
             };
             let artifact = serialize_compact_recursive_actual_pbs_chain_chunk_proof(&proof)?;
             fs::write(&artifact_path, &artifact)?;
+            write_verifier_key(&artifact_path, proof.recursion.verifier_key()?)?;
             (proof, artifact.len(), "written", prove_time, verify_time)
         };
 
@@ -1968,6 +1953,7 @@ fn aggregate_pbs_chain_leaf_artifacts_recursive_demo(
     )?;
     let root_verify_time = root_verify_started.elapsed();
     fs::write(output_path, &root_artifact)?;
+    write_verifier_key(Path::new(output_path), root_proof.root.verifier_key()?)?;
 
     println!(
         "pbs-chain leaf artifacts aggregated: output={}, leaves={}, layers={}, layer_sizes=[{}], root_tables={}, root_public_inputs={}, chain_summary_fields={}",
@@ -2173,6 +2159,7 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
                 }
                 let bytes = serialize_aggregated_recursive_actual_pbs_chain_node_proof(&proof)?;
                 write_artifact_atomic(&output_node_path, &bytes)?;
+                write_verifier_key(&output_node_path, proof.aggregation.verifier_key()?)?;
                 total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
                     .checked_add(bytes.len())
                     .ok_or("aggregate artifact byte count overflow")?;
@@ -2240,6 +2227,7 @@ fn aggregate_pbs_chain_leaf_artifacts_checkpointed_recursive_demo(
     )?;
     let root_verify_time = root_verify_started.elapsed();
     write_artifact_atomic(Path::new(output_path), &root_artifact)?;
+    copy_checkpoint_key(&final_node_path, Path::new(output_path))?;
 
     let layer_sizes = layer_sizes
         .iter()
@@ -2416,6 +2404,7 @@ fn aggregate_pbs_chain_private_compact_leaf_artifacts_checkpointed_recursive_dem
                 let bytes =
                     serialize_compact_aggregated_recursive_actual_pbs_chain_node_proof(&proof)?;
                 write_artifact_atomic(&output_node_path, &bytes)?;
+                write_verifier_key(&output_node_path, proof.aggregation.verifier_key()?)?;
                 total_aggregate_artifact_bytes = total_aggregate_artifact_bytes
                     .checked_add(bytes.len())
                     .ok_or("compact aggregate artifact byte count overflow")?;
@@ -2486,6 +2475,7 @@ fn aggregate_pbs_chain_private_compact_leaf_artifacts_checkpointed_recursive_dem
     )?;
     let root_verify_time = root_verify_started.elapsed();
     write_artifact_atomic(Path::new(output_path), &root_artifact)?;
+    copy_checkpoint_key(&final_node_path, Path::new(output_path))?;
 
     let layer_sizes = layer_sizes
         .iter()
@@ -2557,6 +2547,86 @@ fn load_recursive_pbs_chain_node(
             Ok(LoadedRecursivePbsChainNode::Aggregate(Box::new(proof)))
         }
     }
+}
+
+fn key_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(suffix);
+    value.into()
+}
+fn write_verifier_key(
+    path: &Path,
+    key: &tfheprus_prover::VerifierKey,
+) -> Result<(), Box<dyn Error>> {
+    let candidate = key_path(path, ".vk");
+    write_artifact_atomic(&candidate, &key.to_bytes())?;
+    write_artifact_atomic(
+        &key_path(path, ".vk.sha3"),
+        key.fingerprint().to_string().as_bytes(),
+    )?;
+    println!(
+        "locally prepared verifier key: file={}, fingerprint={}",
+        candidate.display(),
+        key.fingerprint()
+    );
+    Ok(())
+}
+// This copies local setup outputs; it never authenticates an external candidate.
+// External verification always requires a separately supplied fingerprint.
+fn copy_checkpoint_key(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    for suffix in [".vk", ".vk.sha3"] {
+        let bytes = fs::read(key_path(source, suffix)).map_err(|error| {
+            format!("checkpoint has no verifier key; regenerate in a fresh directory: {error}")
+        })?;
+        write_artifact_atomic(&key_path(destination, suffix), &bytes)?;
+    }
+    println!(
+        "root verifier key setup output: file={}, fingerprint={}",
+        key_path(destination, ".vk").display(),
+        fs::read_to_string(key_path(destination, ".vk.sha3"))?
+    );
+    Ok(())
+}
+fn load_authenticated_key(
+    path: &str,
+    pin: &str,
+) -> Result<tfheprus_prover::VerifierKey, Box<dyn Error>> {
+    let expected = pin.parse::<tfheprus_prover::VerifierKeyFingerprint>()?;
+    Ok(tfheprus_prover::VerifierKey::from_authenticated_bytes(
+        &fs::read(path)?,
+        &expected,
+    )?)
+}
+fn verify_authenticated_artifact(
+    kind: &str,
+    path: &str,
+    key_path: &str,
+    pin: &str,
+) -> Result<(), Box<dyn Error>> {
+    let key = load_authenticated_key(key_path, pin)?;
+    let bytes = fs::read(path)?;
+    match kind {
+        "compact" => {
+            let proof =
+                deserialize_compact_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
+            tfheprus_prover::verify_compact_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(&proof.chain_summary, &proof, &key)?;
+        }
+        "full" => {
+            let proof = deserialize_aggregated_recursive_actual_pbs_chain_root_proof(&bytes)?;
+            tfheprus_prover::verify_aggregated_recursive_actual_pbs_chain_root_summary_proof_with_verifier_key(&proof.chain_summary, &proof, &key)?;
+        }
+        "final" => {
+            let proof = deserialize_compact_pbs_keyswitch_proof(&bytes)?;
+            tfheprus_prover::verify_compact_pbs_keyswitch_proof_with_verifier_key(&proof, &key)?;
+        }
+        _ => return Err("unsupported authenticated artifact kind".into()),
+    }
+    println!(
+        "authenticated recursive artifact verified: artifact={}, key_fingerprint={}",
+        path,
+        key.fingerprint()
+    );
+    Ok(())
 }
 
 fn write_artifact_atomic(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -2675,34 +2745,6 @@ fn verify_pbs_chain_compact_root_artifact_recursive_demo(path: &str) -> Result<(
         summary.step_count,
         summary.field_values().len(),
         proof.root.public_input_count(),
-        verify_time.as_millis(),
-        verify_time.as_micros()
-    );
-
-    Ok(())
-}
-
-fn verify_pbs_chain_frontier_artifact_recursive_demo(path: &str) -> Result<(), Box<dyn Error>> {
-    let bytes = fs::read(path)?;
-    let proof = deserialize_aggregated_recursive_actual_pbs_chain_frontier_proof(&bytes)?;
-    let summary = proof.chain_summary.clone();
-    let node_count = proof.node_count();
-    let total_public_inputs = proof.total_public_input_count();
-    let max_public_inputs = proof.max_public_input_count();
-    let verify_started = Instant::now();
-    verify_aggregated_recursive_actual_pbs_chain_frontier_summary_proof(&summary, &proof)?;
-    let verify_time = verify_started.elapsed();
-
-    println!(
-        "pbs-chain frontier artifact verified: artifact={}, artifact_bytes={}, nodes={}, params_n={}, total_steps={}, chain_summary_fields={}, total_public_inputs={}, max_public_inputs={}, verify_ms={}, verify_us={}",
-        path,
-        bytes.len(),
-        node_count,
-        summary.params.lwe_dimension,
-        summary.step_count,
-        summary.field_values().len(),
-        total_public_inputs,
-        max_public_inputs,
         verify_time.as_millis(),
         verify_time.as_micros()
     );
@@ -3959,7 +4001,7 @@ fn format_coefficients(coeffs: &[Goldilocks]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1|secure-128]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1|secure-128]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1|secure-128]|prove-compact-root-keyswitch <compact_root_artifact>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact>|verify-compact-root-keyswitch-recursive <final_artifact>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1|secure-128]|prove-pbs-step-private [toy|moderate|paper-v1|secure-128]|prove-pbs-step-chain [toy|moderate|paper-v1|secure-128]|prove-pbs-chain-chunk [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact>|verify-pbs-chain-frontier-artifact-recursive <frontier_artifact>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-leaf-cost [toy|moderate|paper-v1|secure-128] [chunk_steps] [shape|prove]|profile-pbs-chain-compact-append [toy|moderate|paper-v1|secure-128] [chunk_steps]|profile-pbs-chain-tree [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1|secure-128]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1|secure-128]|run-actual-pbs-native [toy|moderate|paper-v1|secure-128]|run-hom-gate-native [toy|moderate|paper-v1|secure-128]]"
+        "Usage: tfheprus [params|prove-poly-mul|prove-mul-xai|prove-sample-extract|prove-glwe-keyswitch [toy|moderate|paper-v1|secure-128]|prove-glwe-keyswitch-private-key-digest [toy|moderate|paper-v1|secure-128]|bench-glwe-keyswitch-modes [toy|moderate|paper-v1|secure-128]|prove-compact-root-keyswitch <compact_root_artifact> <root_key_file> <trusted_root_key_fingerprint>|prove-compact-root-keyswitch-recursive <compact_root_artifact> <final_artifact> <root_key_file> <trusted_root_key_fingerprint>|verify-compact-root-keyswitch-recursive <final_artifact> <key_file> <trusted_key_fingerprint>|prove-keccak-f1600|prove-pbs-step [toy|moderate|paper-v1|secure-128]|prove-pbs-step-private [toy|moderate|paper-v1|secure-128]|prove-pbs-step-chain [toy|moderate|paper-v1|secure-128]|prove-pbs-chain-chunk [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-chunk-recursive [toy|moderate|paper-v1|secure-128] [steps]|prove-pbs-chain-prefix-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-pbs-chain-pair-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps]|prove-pbs-chain-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-private-tree-aggregate-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_count]|prove-pbs-chain-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-private-leaf-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] [chunk_index] <leaf_artifact>|prove-pbs-chain-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-recursive-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|prove-pbs-chain-private-leaves-compact-fast [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <leaf_artifact_dir>|aggregate-pbs-chain-leaves-recursive <root_artifact> <leaf_artifact>...|aggregate-pbs-chain-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|aggregate-pbs-chain-private-compact-leaf-dir-recursive <root_artifact> <leaf_artifact_dir> [leaf_count]|package-pbs-chain-frontier-recursive <frontier_artifact> <aggregate_artifact>...|package-pbs-chain-frontier-dir-recursive <frontier_artifact> <aggregate_artifact_dir>|verify-pbs-chain-root-artifact-recursive <root_artifact> <key_file> <trusted_key_fingerprint>|verify-pbs-chain-compact-root-artifact-recursive <root_artifact> <key_file> <trusted_key_fingerprint>|inspect-pbs-chain-artifact <leaf|compact-leaf|node|compact-node|root|compact-root|frontier> <artifact>|bench-pbs-chain-private-recursive [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|bench-pbs-chain-private-compact [toy|moderate|paper-v1|secure-128] [chunk_steps] <chunk_count> <artifact_dir>|profile-pbs-chain-leaf-cost [toy|moderate|paper-v1|secure-128] [chunk_steps] [shape|prove]|profile-pbs-chain-compact-append [toy|moderate|paper-v1|secure-128] [chunk_steps]|profile-pbs-chain-tree [toy|moderate|paper-v1|secure-128] [chunk_steps] [total_steps]|prove-actual-pbs|profile-actual-pbs [toy|moderate|paper-v1|secure-128]|profile-sha3-commit [field_count]|profile-pbs-sha3-cost [toy|moderate|paper-v1|secure-128]|run-actual-pbs-native [toy|moderate|paper-v1|secure-128]|run-hom-gate-native [toy|moderate|paper-v1|secure-128]]"
     );
 }
 
